@@ -1,0 +1,39 @@
+{
+  "name": "expo-supabase-starter",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "^2.1.0",
+    "@supabase/supabase-js": "^2.98.0",
+    "dotenv": "^16.4.7",
+    "expo": "~55.0.12",
+    "expo-constants": "~55.0.9",
+    "expo-status-bar": "~55.0.5",
+    "expo-notifications": "~55.0.17",
+    "expo-device": "~55.0.12",
+    "expo-document-picker": "~55.0.12",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.0",
+    "react-native-url-polyfill": "^2.0.0",
+    "react-native-web": "0.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-native": "^0.72.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "babel-preset-expo": "^11.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.0.0",
+    "typescript": "^5.5.0"
+  }
+}
