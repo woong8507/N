@@ -508,7 +508,7 @@ export default function App() {
         'EXPO_PUBLIC_SUPABASE_URL 과 EXPO_PUBLIC_SUPABASE_ANON_KEY 를 .env 에 설정하세요.'
       );
     }
-    const emailValue = email.trim();
+    const emailValue = email.trim().toLowerCase();
     const passwordValue = password.trim();
 
     if (!emailValue || !passwordValue) {
@@ -553,7 +553,7 @@ export default function App() {
       return showMessage('입력 필요', `${missingFields.join(', ')} 항목을 입력하세요.`);
     }
 
-    const emailValue = email.trim();
+    const emailValue = email.trim().toLowerCase();
     const passwordValue = password.trim();
     const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailPattern.test(emailValue) || emailValue.endsWith('@example.com')) {
