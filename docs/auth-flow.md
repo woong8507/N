@@ -19,6 +19,7 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=...
 3. `supabase.auth.signInWithPassword({ email, password })`를 호출합니다.
 4. 성공하면 `session` 상태가 갱신되고 홈 화면으로 이동합니다.
 5. 실패하면 Supabase 에러 메시지를 한국어로 변환해 모달로 보여줍니다.
+6. 세션이 이미 있으면 앱 시작 시 자동으로 복원되고, 홈 화면과 실제 Supabase 데이터를 바로 로드합니다.
 
 ## 회원가입 프로세스
 1. 사용자는 이름, 성별, 이메일, 비밀번호를 입력합니다.
@@ -50,3 +51,14 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=...
 - 비밀번호 관련 오류
 
 모든 안내는 브라우저 기본 alert가 아니라 앱 내부 커스텀 모달로 표시합니다.
+
+## 로그인 후 데이터 로딩
+로그인 또는 세션 복원 후 아래 데이터를 Supabase에서 조회합니다.
+
+- `profiles`: 현재 사용자 이름/성별
+- `matches`: 경기 일정과 결과
+- `teams`: 팀 목록과 인원 수
+- `league_table`: 리그 순위
+- `notices`: 공지 목록
+
+공지 파일 업로드는 Supabase Storage `notice-files` 버킷을 사용합니다.

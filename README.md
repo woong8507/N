@@ -6,6 +6,7 @@
 ## 필수 참고 문서
 - 작업 전에 반드시 `README.md`와 `docs` 폴더를 함께 확인하세요.
 - 인증/회원가입 흐름은 `docs/auth-flow.md`를 기준으로 유지하세요.
+- 관리자 메뉴 권한 기준은 `docs/admin-permissions.md`를 기준으로 정리하세요.
 
 ## 1) 환경 변수
 복사 후 값 채우기:
@@ -13,8 +14,8 @@
 ```bash
 cp .env.example .env
 ```
-- `SUPABASE_URL`: 프로젝트 API URL (https://*.supabase.co)
-- `SUPABASE_ANON_KEY`: anon public key
+- `EXPO_PUBLIC_SUPABASE_URL`: 프로젝트 API URL (https://*.supabase.co)
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY`: anon public key
 
 ## 2) 의존성 설치
 Node 20.19+ 권장. (SDK 55 기준)
@@ -50,9 +51,9 @@ create policy "Logged-in can insert" on public.notes
 - iOS: `npm run ios` / Android: `npm run android`
 
 ## 5) 코드 포인트
-- `app.config.ts`: .env -> Expo extra로 주입
+- `app.config.ts`: `.env` -> Expo `extra`로 주입
 - `src/lib/supabase.ts`: 클라이언트 생성, AsyncStorage 세션 유지
-- `App.tsx`: magic link 로그인 + notes CRUD UI
+- `App.tsx`: 이메일/비밀번호 로그인, 리그/경기/공지 조회, 공지 파일 업로드 UI
 
 ## 6) 빌드/배포
 - 모바일: Expo EAS (`eas build --platform ios|android`, `eas submit ...`)
@@ -63,6 +64,7 @@ create policy "Logged-in can insert" on public.notes
 - iOS/Android에서만 작동(웹 제외). 시뮬레이터는 토큰을 받지 못하니 실제 디바이스에서 테스트하세요.
 - 코드: `src/lib/push.ts`에서 권한 요청 → Expo Push Token 발급 → Supabase `push_tokens` 테이블에 upsert.
 - `App.tsx`에서 로그인 세션이 생기면 자동 등록.
+- `eas.projectId`가 올바르게 설정되어 있어야 안정적으로 Expo Push Token을 발급할 수 있습니다.
 
 Supabase 테이블/정책:
 ```sql
@@ -73,6 +75,9 @@ create table public.push_tokens (
   platform text not null,
   created_at timestamp with time zone default timezone('utc'::text, now())
 );
+
+create unique index push_tokens_user_id_token_key
+  on public.push_tokens (user_id, token);
 
 alter table public.push_tokens enable row level security;
 
@@ -85,6 +90,10 @@ create policy "Insert own tokens" on public.push_tokens
 create policy "Update own tokens" on public.push_tokens
   for update using (auth.uid() = user_id);
 ```
+
+## 8) 공지 파일 업로드
+- Storage 버킷 `notice-files`를 public bucket으로 생성하세요.
+- 앱은 선택한 파일을 `notice-files/<user-id>/...` 경로로 업로드한 뒤 `public.notices`에 `title`, `body`, `file_url`, `author_id`를 저장합니다.
 
 서버에서 발송하기 (예: Supabase Edge Functions / Node 서버)
 - Expo Push API endpoint: `https://exp.host/--/api/v2/push/send`

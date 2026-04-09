@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
 
@@ -14,6 +15,8 @@ export type PushTokenRow = {
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
@@ -23,6 +26,9 @@ Notifications.setNotificationHandler({
  * Ask permission, get Expo push token, and persist to Supabase `push_tokens` table.
  */
 export async function registerForPush() {
+  if (!supabase) return null;
+  if (Platform.OS === 'web') return null;
+
   if (!Device.isDevice) {
     console.warn('Push notifications require a physical device');
     return null;
@@ -41,22 +47,30 @@ export async function registerForPush() {
     return null;
   }
 
-  const projectId = Notifications.getExpoPushTokenAsync ? (await Notifications.getExpoPushTokenAsync()).data : null;
-  if (!projectId) return null;
+  const projectId = Constants.expoConfig?.extra?.eas?.projectId as string | undefined;
+  const token = (
+    await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined)
+  ).data;
+  if (!token) return null;
 
   const platform = Platform.OS;
 
   // Persist to Supabase (auth user required)
   const { data: user } = await supabase.auth.getUser();
-  if (!user?.user) return projectId;
+  if (!user?.user) return token;
 
-  const { error } = await supabase.from('push_tokens').upsert({
-    user_id: user.user.id,
-    token: projectId,
-    platform,
-  });
+  const { error } = await supabase.from('push_tokens').upsert(
+    {
+      user_id: user.user.id,
+      token,
+      platform,
+    },
+    {
+      onConflict: 'user_id,token',
+    }
+  );
 
   if (error) console.warn('Failed to save push token', error.message);
 
-  return projectId;
+  return token;
 }

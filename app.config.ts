@@ -10,26 +10,29 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   orientation: 'portrait',
   platforms: ['ios', 'android', 'web'],
   extra: {
-    SUPABASE_URL: process.env.SUPABASE_URL ?? '',
-    SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ?? '',
+    EXPO_PUBLIC_SUPABASE_URL:
+      process.env.EXPO_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '',
+    EXPO_PUBLIC_SUPABASE_ANON_KEY:
+      process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? process.env.SUPABASE_ANON_KEY ?? '',
+    SUPABASE_URL: process.env.EXPO_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '',
+    SUPABASE_ANON_KEY:
+      process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? process.env.SUPABASE_ANON_KEY ?? '',
     eas: {
-      projectId: 'CHANGE_ME_BEFORE_BUILD'
-    }
+      projectId: 'CHANGE_ME_BEFORE_BUILD',
+    },
   },
   ios: {
-    supportsTablet: true
+    supportsTablet: true,
   },
   android: {
-    permissions: [
-      'NOTIFICATIONS',
-    ],
+    permissions: ['NOTIFICATIONS'],
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
-      backgroundColor: '#ffffff'
-    }
+      backgroundColor: '#ffffff',
+    },
   },
   web: {
-    bundler: 'metro'
+    bundler: 'metro',
   },
   plugins: [
     [
@@ -40,5 +43,5 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         sounds: [],
       },
     ],
-  ]
+  ],
 });
