@@ -93,7 +93,7 @@ create policy "Update own tokens" on public.push_tokens
 
 ## 8) 공지 파일 업로드
 - Storage 버킷 `notice-files`를 public bucket으로 생성하세요.
-- 앱은 선택한 파일을 `notice-files/<user-id>/...` 경로로 업로드한 뒤 `public.notices`에 `title`, `body`, `file_url`, `author_id`를 저장합니다.
+- 앱은 선택한 파일을 `notice-files/<user-id>/...` 경로로 업로드한 뒤 `public.notices`에 `title`, `body`, `file_path`, `file_url`, `author_id`를 저장합니다.
 
 서버에서 발송하기 (예: Supabase Edge Functions / Node 서버)
 - Expo Push API endpoint: `https://exp.host/--/api/v2/push/send`

@@ -10,6 +10,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
   ScrollView,
 } from 'react-native';
@@ -35,7 +36,7 @@ const colors = {
   neonSoft: '#86ff6a',
 };
 
-type Screen = 'auth' | 'signup' | 'home' | 'schedule' | 'teams' | 'notice' | 'mySchedule' | 'league';
+type Screen = 'auth' | 'signup' | 'home' | 'schedule' | 'teams' | 'notice' | 'mySchedule' | 'league' | 'admin' | 'seasonAdmin' | 'seasonDetailAdmin';
 type Gender = 'MALE' | 'FEMALE';
 type ProfileRole = 'member' | 'admin' | 'super_admin';
 
@@ -67,7 +68,13 @@ type Team = {
 type Season = {
   id: number;
   name: string;
-  status: 'draft' | 'active' | 'closed';
+  description: string | null;
+  status: 'active' | 'inactive';
+};
+
+type SeasonForm = {
+  name: string;
+  description: string;
 };
 
 type LeagueRow = {
@@ -95,6 +102,7 @@ type Notice = {
   id: number;
   title: string;
   body: string | null;
+  file_path: string | null;
   file_url: string | null;
   created_at: string;
 };
@@ -156,6 +164,11 @@ const emptySignupForm: SignupForm = {
   password: '',
   name: '',
   gender: 'MALE',
+};
+
+const emptySeasonForm: SeasonForm = {
+  name: '',
+  description: '',
 };
 
 const previewProfile: Profile = {
@@ -233,6 +246,7 @@ const previewNotices: Notice[] = [
     id: 1,
     title: '4월 2주차 메인 경기 오픈',
     body: '금요일 4F 대표 경기와 하이라이트 편성이 확정되었습니다.',
+    file_path: null,
     file_url: null,
     created_at: '2026-04-09T09:00:00+09:00',
   },
@@ -240,6 +254,7 @@ const previewNotices: Notice[] = [
     id: 2,
     title: '유니폼 공지',
     body: '이번 주는 홈팀이 레드, 원정팀이 블루를 착용합니다.',
+    file_path: null,
     file_url: null,
     created_at: '2026-04-08T12:30:00+09:00',
   },
@@ -290,10 +305,29 @@ const toCreatedAtLabel = (value: string) => {
 };
 
 const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '-');
+const isAdminAccount = (role: ProfileRole | null | undefined) => role === 'admin' || role === 'super_admin';
+const isSuperAdminAccount = (role: ProfileRole | null | undefined) => role === 'super_admin';
+const makeSeasonSlug = (name: string) =>
+  `${name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'season'}-${Date.now().toString(36)}`;
+
+const getNoticeFileUrl = (notice: Notice) => {
+  if (notice.file_path && supabase) {
+    const { data } = supabase.storage.from(NOTICE_BUCKET).getPublicUrl(notice.file_path);
+    return data.publicUrl;
+  }
+
+  return notice.file_url;
+};
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [screen, setScreen] = useState<Screen>('auth');
+  const [previousScreen, setPreviousScreen] = useState<Screen>('home');
   const [isHomePreview, setIsHomePreview] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -306,16 +340,21 @@ export default function App() {
   });
   const [profile, setProfile] = useState<Profile | null>(null);
   const [activeSeason, setActiveSeason] = useState<Season | null>(null);
+  const [seasons, setSeasons] = useState<Season[]>([]);
+  const [selectedAdminSeason, setSelectedAdminSeason] = useState<Season | null>(null);
   const [memberTeamIds, setMemberTeamIds] = useState<number[]>([]);
   const [schedules, setSchedules] = useState<MatchSchedule[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [leagueTable, setLeagueTable] = useState<LeagueRow[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [seasonForm, setSeasonForm] = useState<SeasonForm>(emptySeasonForm);
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeBody, setNoticeBody] = useState('');
   const [selectedNoticeFile, setSelectedNoticeFile] = useState<DocumentPickerAsset | null>(null);
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [isUploadingNotice, setIsUploadingNotice] = useState(false);
+  const [isCreatingSeason, setIsCreatingSeason] = useState(false);
+  const [deletingNoticeId, setDeletingNoticeId] = useState<number | null>(null);
 
   const mySchedules = schedules.filter(
     (match) =>
@@ -343,6 +382,8 @@ export default function App() {
     if (!session) {
       setProfile(null);
       setActiveSeason(null);
+      setSeasons([]);
+      setSelectedAdminSeason(null);
       setMemberTeamIds([]);
       setSchedules([]);
       setTeams([]);
@@ -367,24 +408,31 @@ export default function App() {
 
       const [
         profileResult,
-        seasonResult,
+        seasonsResult,
         noticesResult,
       ] = await Promise.all([
         client.from('profiles').select('id, name, gender, role, auto_login').eq('id', session.user.id).maybeSingle(),
-        client.from('seasons').select('id, name, status').eq('status', 'active').order('starts_at', { ascending: false }).limit(1).maybeSingle(),
-        client.from('notices').select('id, title, body, file_url, created_at').order('created_at', { ascending: false }),
+        client.from('seasons').select('id, name, description, status').order('created_at', { ascending: false }),
+        client
+          .from('notices')
+          .select('id, title, body, file_path, file_url, created_at')
+          .order('created_at', { ascending: false }),
       ]);
 
       if (profileResult.error) {
         showMessage('프로필 불러오기 실패', profileResult.error.message);
       } else {
-        setProfile(profileResult.data ?? null);
+        const nextProfile = profileResult.data ?? null;
+        setProfile(nextProfile);
+        setScreen('home');
       }
 
-      if (seasonResult.error) {
-        showMessage('시즌 불러오기 실패', seasonResult.error.message);
+      if (seasonsResult.error) {
+        showMessage('시즌 불러오기 실패', seasonsResult.error.message);
       } else {
-        setActiveSeason((seasonResult.data as Season | null) ?? null);
+        const nextSeasons = (seasonsResult.data as Season[] | null) ?? [];
+        setSeasons(nextSeasons);
+        setActiveSeason(nextSeasons.find((season) => season.status === 'active') ?? null);
       }
 
       if (noticesResult.error) {
@@ -393,7 +441,7 @@ export default function App() {
         setNotices((noticesResult.data as Notice[] | null) ?? []);
       }
 
-      const nextSeason = (seasonResult.data as Season | null) ?? null;
+      const nextSeason = ((seasonsResult.data as Season[] | null) ?? []).find((season) => season.status === 'active') ?? null;
       if (!nextSeason) {
         setMemberTeamIds([]);
         setSchedules([]);
@@ -477,6 +525,127 @@ export default function App() {
     setDialog({ visible: true, title, message });
   };
 
+  const refreshSeasons = async (client: NonNullable<typeof supabase>) => {
+    const seasonsResult = await client
+      .from('seasons')
+      .select('id, name, description, status')
+      .order('created_at', { ascending: false });
+
+    if (seasonsResult.error) {
+      throw seasonsResult.error;
+    }
+
+    const nextSeasons = (seasonsResult.data as Season[] | null) ?? [];
+    setSeasons(nextSeasons);
+    setActiveSeason(nextSeasons.find((season) => season.status === 'active') ?? null);
+
+    return nextSeasons;
+  };
+
+  const syncSelectedAdminSeason = (nextSeasons: Season[], seasonId: number) => {
+    const nextSelectedSeason = nextSeasons.find((season) => season.id === seasonId) ?? null;
+    setSelectedAdminSeason(nextSelectedSeason);
+    return nextSelectedSeason;
+  };
+
+  const refreshNotices = async (client: NonNullable<typeof supabase>) => {
+    const noticesResult = await client
+      .from('notices')
+      .select('id, title, body, file_path, file_url, created_at')
+      .order('created_at', { ascending: false });
+
+    if (noticesResult.error) {
+      throw noticesResult.error;
+    }
+
+    setNotices((noticesResult.data as Notice[] | null) ?? []);
+  };
+
+  const createSeason = async () => {
+    const client = supabase;
+    if (!client || !session) {
+      return showMessage('로그인 필요', '시즌 등록은 로그인 후 사용할 수 있습니다.');
+    }
+    if (!isAdminAccount(profile?.role)) {
+      return showMessage('권한 없음', '시즌 등록은 admin 이상 계정만 사용할 수 있습니다.');
+    }
+
+    const name = seasonForm.name.trim();
+    const description = seasonForm.description.trim();
+
+    if (!name) {
+      return showMessage('시즌명 필요', '시즌명을 입력하세요.');
+    }
+
+    setIsCreatingSeason(true);
+
+    try {
+      const status: Season['status'] = activeSeason ? 'inactive' : 'active';
+      const insertResult = await client.from('seasons').insert({
+        name,
+        description: description || null,
+        slug: makeSeasonSlug(name),
+        status,
+        created_by: session.user.id,
+      });
+
+      if (insertResult.error) {
+        throw insertResult.error;
+      }
+
+      await refreshSeasons(client);
+      setSeasonForm(emptySeasonForm);
+      showMessage(
+        '시즌 등록 완료',
+        status === 'active'
+          ? '첫 시즌이 활성 시즌으로 등록되었습니다.'
+          : '새 시즌이 비활성 상태로 등록되었습니다.'
+      );
+    } catch (error) {
+      showMessage(
+        '시즌 등록 실패',
+        error instanceof Error ? error.message : '시즌 저장 중 오류가 발생했습니다.'
+      );
+    } finally {
+      setIsCreatingSeason(false);
+    }
+  };
+
+  const updateSeasonStatus = async (season: Season, nextStatus: Season['status']) => {
+    const client = supabase;
+    if (!client || !session) {
+      return showMessage('로그인 필요', '시즌 상태 변경은 로그인 후 사용할 수 있습니다.');
+    }
+    if (!isAdminAccount(profile?.role)) {
+      return showMessage('권한 없음', '시즌 상태 변경은 admin 이상 계정만 사용할 수 있습니다.');
+    }
+
+    try {
+      const updateResult = await client
+        .from('seasons')
+        .update({ status: nextStatus })
+        .eq('id', season.id);
+
+      if (updateResult.error) {
+        throw updateResult.error;
+      }
+
+      const nextSeasons = await refreshSeasons(client);
+      syncSelectedAdminSeason(nextSeasons, season.id);
+      showMessage(
+        '시즌 상태 변경 완료',
+        nextStatus === 'active'
+          ? `${season.name} 시즌이 활성 시즌으로 설정되었습니다.`
+          : `${season.name} 시즌이 비활성 상태로 변경되었습니다.`
+      );
+    } catch (error) {
+      showMessage(
+        '시즌 상태 변경 실패',
+        error instanceof Error ? error.message : '시즌 상태 변경 중 오류가 발생했습니다.'
+      );
+    }
+  };
+
   const formatAuthError = (message: string) => {
     const normalizedMessage = message.toLowerCase();
 
@@ -529,7 +698,6 @@ export default function App() {
 
       setEmail(emailValue);
       setPassword('');
-      setScreen('home');
     } finally {
       setIsSubmittingAuth(false);
     }
@@ -605,34 +773,39 @@ export default function App() {
     if (!noticeTitle.trim()) {
       return showMessage('제목 필요', '공지 제목을 먼저 입력하세요.');
     }
-    if (!selectedNoticeFile) {
-      return showMessage('파일 선택 필요', '업로드할 파일을 선택하세요.');
-    }
 
     setIsUploadingNotice(true);
 
     try {
-      const fileName = `${session.user.id}/${Date.now()}-${sanitizeFileName(selectedNoticeFile.name)}`;
-      const response = await fetch(selectedNoticeFile.uri);
-      const fileBlob = await response.blob();
+      let filePath: string | null = null;
+      let fileUrl: string | null = null;
 
-      const uploadResult = await client.storage.from(NOTICE_BUCKET).upload(fileName, fileBlob, {
-        contentType: selectedNoticeFile.mimeType ?? 'application/octet-stream',
-        upsert: false,
-      });
+      if (selectedNoticeFile) {
+        const fileName = `${session.user.id}/${Date.now()}-${sanitizeFileName(selectedNoticeFile.name)}`;
+        const response = await fetch(selectedNoticeFile.uri);
+        const fileBlob = await response.blob();
 
-      if (uploadResult.error) {
-        throw new Error(
-          `${uploadResult.error.message} (Storage bucket: ${NOTICE_BUCKET})`
-        );
+        const uploadResult = await client.storage.from(NOTICE_BUCKET).upload(fileName, fileBlob, {
+          contentType: selectedNoticeFile.mimeType ?? 'application/octet-stream',
+          upsert: false,
+        });
+
+        if (uploadResult.error) {
+          throw new Error(
+            `${uploadResult.error.message} (Storage bucket: ${NOTICE_BUCKET})`
+          );
+        }
+
+        const { data: publicUrlData } = client.storage.from(NOTICE_BUCKET).getPublicUrl(fileName);
+        filePath = fileName;
+        fileUrl = publicUrlData.publicUrl;
       }
-
-      const { data: publicUrlData } = client.storage.from(NOTICE_BUCKET).getPublicUrl(fileName);
 
       const insertResult = await client.from('notices').insert({
         title: noticeTitle.trim(),
         body: noticeBody.trim() || null,
-        file_url: publicUrlData.publicUrl,
+        file_path: filePath,
+        file_url: fileUrl,
         author_id: session.user.id,
       });
 
@@ -640,20 +813,11 @@ export default function App() {
         throw insertResult.error;
       }
 
-      const noticesResult = await client
-        .from('notices')
-        .select('id, title, body, file_url, created_at')
-        .order('created_at', { ascending: false });
-
-      if (noticesResult.error) {
-        throw noticesResult.error;
-      }
-
-      setNotices((noticesResult.data as Notice[] | null) ?? []);
+      await refreshNotices(client);
       setNoticeTitle('');
       setNoticeBody('');
       setSelectedNoticeFile(null);
-      showMessage('공지 업로드 완료', '파일과 공지 레코드가 Supabase에 저장되었습니다.');
+      showMessage('저장 완료');
     } catch (error) {
       showMessage(
         '공지 업로드 실패',
@@ -666,6 +830,39 @@ export default function App() {
     }
   };
 
+  const deleteNotice = async (notice: Notice) => {
+    const client = supabase;
+    if (!client || !session) {
+      return showMessage('로그인 필요', '공지 삭제는 로그인 후 사용할 수 있습니다.');
+    }
+
+    setDeletingNoticeId(notice.id);
+
+    try {
+      if (notice.file_path) {
+        const removeResult = await client.storage.from(NOTICE_BUCKET).remove([notice.file_path]);
+        if (removeResult.error) {
+          throw removeResult.error;
+        }
+      }
+
+      const deleteResult = await client.from('notices').delete().eq('id', notice.id);
+      if (deleteResult.error) {
+        throw deleteResult.error;
+      }
+
+      await refreshNotices(client);
+      showMessage('삭제 완료');
+    } catch (error) {
+      showMessage(
+        '공지 삭제 실패',
+        error instanceof Error ? error.message : '공지와 첨부 파일 삭제 중 오류가 발생했습니다.'
+      );
+    } finally {
+      setDeletingNoticeId(null);
+    }
+  };
+
   const homeProfile = isHomePreview ? previewProfile : profile;
   const homeSchedules = isHomePreview ? previewSchedules : schedules;
   const homeMySchedules = isHomePreview ? previewSchedules.slice(0, 2) : mySchedules;
@@ -673,6 +870,20 @@ export default function App() {
   const homeNotices = isHomePreview ? previewNotices : notices;
   const homeLeagueTable = isHomePreview ? previewLeagueTable : leagueTable;
   const isShowingHome = screen === 'home' && (session || isHomePreview);
+  const canAccessAdmin = isAdminAccount(profile?.role);
+  const goBackScreen = previousScreen === 'seasonAdmin'
+    ? 'seasonAdmin'
+    : previousScreen === 'seasonDetailAdmin'
+      ? 'seasonDetailAdmin'
+    : previousScreen === 'admin'
+      ? 'admin'
+      : 'home';
+
+  useEffect(() => {
+    if (screen === 'admin' && !canAccessAdmin) {
+      setScreen('home');
+    }
+  }, [canAccessAdmin, screen]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -719,14 +930,23 @@ export default function App() {
           {isShowingHome && (
             <HomeScreen
               profile={homeProfile}
+              canAccessAdmin={canAccessAdmin}
               isLoadingData={isHomePreview ? false : isLoadingData}
               schedules={homeSchedules}
               mySchedules={homeMySchedules}
               teams={homeTeams}
               notices={homeNotices}
               leagueTable={homeLeagueTable}
-              onNavigate={(nextScreen) => setScreen(nextScreen)}
-              onAdminPress={() => showMessage('관리자 메뉴', '관리자 전용 설정 화면은 다음 단계에서 연결합니다.')}
+              onNavigate={(nextScreen) => {
+                setPreviousScreen('home');
+                setScreen(nextScreen);
+              }}
+              onAdminPress={() => {
+                if (canAccessAdmin) {
+                  setPreviousScreen('home');
+                  setScreen('admin');
+                }
+              }}
               onSignOut={async () => {
                 if (isHomePreview) {
                   setIsHomePreview(false);
@@ -743,37 +963,95 @@ export default function App() {
           {session && screen !== 'home' && (
             <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
               {screen === 'schedule' && (
-                <ScheduleScreen data={schedules} goBack={() => setScreen('home')} />
+                <ScheduleScreen
+                  data={schedules}
+                  goBack={() => setScreen(goBackScreen)}
+                  subtitle={activeSeason ? `${activeSeason.name} 시즌 경기 목록입니다.` : undefined}
+                />
               )}
 
               {screen === 'league' && (
                 <LeagueScreen
                   data={leagueTable}
                   seasonName={activeSeason?.name ?? null}
-                  goBack={() => setScreen('home')}
+                  goBack={() => setScreen(goBackScreen)}
                 />
               )}
 
               {screen === 'mySchedule' && (
-                <ScheduleScreen data={mySchedules} goBack={() => setScreen('home')} title="나의 경기 일정" />
+                <ScheduleScreen data={mySchedules} goBack={() => setScreen(goBackScreen)} title="나의 경기 일정" />
               )}
 
               {screen === 'teams' && (
-                <TeamsScreen teams={teams} goBack={() => setScreen('home')} />
+                <TeamsScreen
+                  teams={teams}
+                  seasonName={activeSeason?.name ?? null}
+                  goBack={() => setScreen(goBackScreen)}
+                />
               )}
 
               {screen === 'notice' && (
                 <NoticeScreen
-                  canManage={profile?.role === 'admin' || profile?.role === 'super_admin'}
+                  canManage={isAdminAccount(profile?.role)}
                   notices={notices}
                   noticeTitle={noticeTitle}
                   noticeBody={noticeBody}
                   selectedFileName={selectedNoticeFile?.name ?? null}
                   isUploading={isUploadingNotice}
+                  deletingNoticeId={deletingNoticeId}
                   onChangeTitle={setNoticeTitle}
                   onChangeBody={setNoticeBody}
                   onPickFile={pickNoticeFile}
                   onUpload={uploadNotice}
+                  onDelete={deleteNotice}
+                  goBack={() => setScreen(goBackScreen)}
+                />
+              )}
+
+              {screen === 'seasonAdmin' && (
+                <SeasonManagementScreen
+                  activeSeason={activeSeason}
+                  seasons={seasons}
+                  seasonForm={seasonForm}
+                  isCreatingSeason={isCreatingSeason}
+                  onChangeSeasonForm={setSeasonForm}
+                  onCreateSeason={createSeason}
+                  onOpenSeason={(season) => {
+                    setSelectedAdminSeason(season);
+                    setPreviousScreen('seasonAdmin');
+                    setScreen('seasonDetailAdmin');
+                  }}
+                  goBack={() => setScreen('admin')}
+                />
+              )}
+
+              {screen === 'seasonDetailAdmin' && selectedAdminSeason && (
+                <SeasonOperationsScreen
+                  season={selectedAdminSeason}
+                  activeSeason={activeSeason}
+                  schedules={schedules}
+                  teams={teams}
+                  onUpdateSeasonStatus={updateSeasonStatus}
+                  onNavigate={(nextScreen) => {
+                    setPreviousScreen('seasonDetailAdmin');
+                    setScreen(nextScreen);
+                  }}
+                  goBack={() => setScreen('seasonAdmin')}
+                />
+              )}
+
+              {screen === 'admin' && canAccessAdmin && (
+                <AdminScreen
+                  profile={profile}
+                  activeSeason={activeSeason}
+                  seasons={seasons}
+                  notices={notices}
+                  schedules={schedules}
+                  teams={teams}
+                  onNavigate={(nextScreen) => {
+                    setPreviousScreen('admin');
+                    setScreen(nextScreen);
+                  }}
                   goBack={() => setScreen('home')}
                 />
               )}
@@ -999,6 +1277,7 @@ function SignupScreen({
 
 function HomeScreen({
   profile,
+  canAccessAdmin,
   isLoadingData,
   schedules,
   mySchedules,
@@ -1010,6 +1289,7 @@ function HomeScreen({
   onSignOut,
 }: {
   profile: Profile | null;
+  canAccessAdmin: boolean;
   isLoadingData: boolean;
   schedules: MatchSchedule[];
   mySchedules: MatchSchedule[];
@@ -1022,7 +1302,6 @@ function HomeScreen({
 }) {
   const featuredMatch = schedules[0] ?? null;
   const liveMatches = schedules.slice(0, 5);
-  const canAccessAdmin = profile?.role === 'admin' || profile?.role === 'super_admin';
   const shortcutItems: Array<{
     label: string;
     meta: string;
@@ -1231,10 +1510,12 @@ function ScheduleScreen({
   data,
   goBack,
   title = '경기 일정 & 결과',
+  subtitle,
 }: {
   data: MatchSchedule[];
   goBack: () => void;
   title?: string;
+  subtitle?: string;
 }) {
   return (
     <View style={styles.card}>
@@ -1242,6 +1523,7 @@ function ScheduleScreen({
         <Text style={styles.link}>{'< Back'}</Text>
       </TouchableOpacity>
       <Text style={styles.logoTitle}>{title}</Text>
+      {!!subtitle && <Text style={styles.muted}>{subtitle}</Text>}
       <View style={styles.matchTableHeader}>
         {['일자', '요일', '장소', 'Home', 'Away', 'Pen./Adv.', '경기결과'].map((h) => (
           <Text key={h} style={[styles.tableHeaderText, h === 'Pen./Adv.' ? { flex: 1.5 } : {}]}>{h}</Text>
@@ -1274,14 +1556,26 @@ function ScheduleScreen({
   );
 }
 
-function TeamsScreen({ teams, goBack }: { teams: Team[]; goBack: () => void }) {
+function TeamsScreen({
+  teams,
+  goBack,
+  seasonName,
+}: {
+  teams: Team[];
+  goBack: () => void;
+  seasonName?: string | null;
+}) {
   return (
     <View style={styles.card}>
       <TouchableOpacity onPress={goBack}>
         <Text style={styles.link}>{'< Back'}</Text>
       </TouchableOpacity>
       <Text style={styles.logoTitle}>팀 관리</Text>
-      <Text style={styles.muted}>현재 스키마 기준으로 팀명과 인원 수를 Supabase에서 불러옵니다.</Text>
+      <Text style={styles.muted}>
+        {seasonName
+          ? `${seasonName} 시즌에 속한 팀 목록입니다.`
+          : '현재 스키마 기준으로 팀명과 인원 수를 Supabase에서 불러옵니다.'}
+      </Text>
       {teams.map((t) => (
         <View key={t.id} style={[styles.listCard, { marginTop: 10 }]}>
           <Text style={styles.body}>{t.name}</Text>
@@ -1300,10 +1594,12 @@ function NoticeScreen({
   noticeBody,
   selectedFileName,
   isUploading,
+  deletingNoticeId,
   onChangeTitle,
   onChangeBody,
   onPickFile,
   onUpload,
+  onDelete,
   goBack,
 }: {
   canManage: boolean;
@@ -1312,10 +1608,12 @@ function NoticeScreen({
   noticeBody: string;
   selectedFileName: string | null;
   isUploading: boolean;
+  deletingNoticeId: number | null;
   onChangeTitle: (value: string) => void;
   onChangeBody: (value: string) => void;
   onPickFile: () => void;
   onUpload: () => void;
+  onDelete: (notice: Notice) => void;
   goBack: () => void;
 }) {
   return (
@@ -1324,7 +1622,6 @@ function NoticeScreen({
         <Text style={styles.link}>{'< Back'}</Text>
       </TouchableOpacity>
       <Text style={styles.logoTitle}>공지사항</Text>
-      <Text style={styles.muted}>파일은 Supabase Storage `notice-files` 버킷에 업로드됩니다.</Text>
       {canManage && (
         <>
           <Label text="NOTICE TITLE" required={false} />
@@ -1355,8 +1652,17 @@ function NoticeScreen({
           <Text style={styles.body}>{notice.title}</Text>
           {!!notice.body && <Text style={styles.muted}>{notice.body}</Text>}
           <Text style={styles.muted}>{toCreatedAtLabel(notice.created_at)}</Text>
-          {!!notice.file_url && (
-            <TouchableOpacity onPress={() => Linking.openURL(notice.file_url!)}>
+          {canManage && (
+            <View style={styles.noticeActionRow}>
+              <TouchableOpacity onPress={() => onDelete(notice)} disabled={deletingNoticeId === notice.id}>
+                <Text style={styles.noticeDeleteLink}>
+                  {deletingNoticeId === notice.id ? '삭제 중...' : '공지 삭제'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {!!getNoticeFileUrl(notice) && (
+            <TouchableOpacity onPress={() => Linking.openURL(getNoticeFileUrl(notice)!)}>
               <Text style={styles.footerLink}>첨부 파일 열기</Text>
             </TouchableOpacity>
           )}
@@ -1405,6 +1711,519 @@ function LeagueScreen({
   );
 }
 
+function AdminScreen({
+  profile,
+  activeSeason,
+  seasons,
+  notices,
+  schedules,
+  teams,
+  onNavigate,
+  goBack,
+}: {
+  profile: Profile | null;
+  activeSeason: Season | null;
+  seasons: Season[];
+  notices: Notice[];
+  schedules: MatchSchedule[];
+  teams: Team[];
+  onNavigate: React.Dispatch<React.SetStateAction<Screen>>;
+  goBack: () => void;
+}) {
+  const { width } = useWindowDimensions();
+  const isWebDesktop = Platform.OS === 'web' && width >= 960;
+  const canManageUsers = isSuperAdminAccount(profile?.role);
+  const isAdmin = isAdminAccount(profile?.role);
+  const upcomingMatch = schedules[0] ?? null;
+  const recentNotice = notices[0] ?? null;
+  const menuItems: Array<{
+    key: string;
+    title: string;
+    description: string;
+    badge: string;
+    icon: keyof typeof MaterialCommunityIcons.glyphMap;
+    enabled: boolean;
+    onPress?: () => void;
+  }> = [
+    {
+      key: 'dashboard',
+      title: '운영 대시보드',
+      description: '현재 시즌과 운영 상태를 한 번에 확인합니다.',
+      badge: activeSeason?.name ?? '시즌 없음',
+      icon: 'view-dashboard-outline',
+      enabled: true,
+    },
+    {
+      key: 'notice',
+      title: '공지사항 관리',
+      description: '공지 등록, 수정, 첨부 파일 업로드를 처리합니다.',
+      badge: `${notices.length}건`,
+      icon: 'bullhorn-outline',
+      enabled: true,
+      onPress: () => onNavigate('notice'),
+    },
+    {
+      key: 'season',
+      title: '시즌 관리',
+      description: '공지사항 관리처럼 별도 페이지에서 시즌 등록, 목록 확인, 시즌 문맥 운영을 처리합니다.',
+      badge: activeSeason ? `${activeSeason.name}` : '시즌 등록',
+      icon: 'calendar-multiple-check',
+      enabled: true,
+      onPress: () => onNavigate('seasonAdmin'),
+    },
+  ];
+
+  if (canManageUsers) {
+    menuItems.push({
+      key: 'roles',
+      title: '권한 관리',
+      description: '관리자 권한 부여와 역할 변경을 위한 확장 영역입니다.',
+      badge: 'super_admin',
+      icon: 'account-key-outline',
+      enabled: false,
+    });
+  }
+
+  const statusCards = [
+    {
+      key: 'season',
+      label: '현재 시즌',
+      value: activeSeason?.name ?? '활성 시즌 없음',
+      tone: 'neon',
+    },
+    {
+      key: 'role',
+      label: '권한',
+      value: isAdmin ? (profile?.role ?? 'admin') : 'member',
+      tone: 'accent',
+    },
+    {
+      key: 'notice',
+      label: '최근 공지',
+      value: recentNotice ? toCreatedAtLabel(recentNotice.created_at) : '데이터 없음',
+      tone: 'default',
+    },
+  ] as const;
+
+  if (!isAdmin) {
+    return (
+      <View style={styles.adminShell}>
+        <TouchableOpacity onPress={goBack}>
+          <Text style={styles.link}>{'< Back'}</Text>
+        </TouchableOpacity>
+        <Text style={styles.logoTitle}>권한이 없습니다.</Text>
+        <Text style={styles.muted}>관리자 화면은 admin 이상 계정에서만 접근할 수 있습니다.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.adminShell}>
+      <TouchableOpacity onPress={goBack}>
+        <Text style={styles.link}>{'< Back'}</Text>
+      </TouchableOpacity>
+
+      <View style={[styles.adminLayout, isWebDesktop && styles.adminLayoutDesktop]}>
+        {isWebDesktop && (
+          <View style={styles.adminSidebar}>
+            <Text style={styles.adminSidebarEyebrow}>ADMIN MODE</Text>
+            <Text style={styles.adminSidebarTitle}>운영 메뉴</Text>
+            {menuItems.map((item) => (
+              <TouchableOpacity
+                key={item.key}
+                style={styles.adminSidebarItem}
+                onPress={item.onPress}
+                disabled={!item.onPress}
+              >
+                <MaterialCommunityIcons
+                  name={item.icon}
+                  size={18}
+                  color={item.onPress ? colors.accent : colors.sub}
+                />
+                <View style={styles.adminSidebarItemBody}>
+                  <Text style={styles.adminSidebarItemTitle}>{item.title}</Text>
+                  <Text style={styles.adminSidebarItemMeta}>{item.badge}</Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        <View style={styles.adminMain}>
+          <View style={styles.adminHero}>
+            <View style={styles.adminHeroHeader}>
+              <View>
+                <Text style={styles.logoTitle}>관리자 대시보드</Text>
+                <Text style={styles.muted}>
+                  웹에서는 운영 패널처럼, 모바일에서는 관리자 허브처럼 동작하도록 설계했습니다.
+                </Text>
+              </View>
+              <View style={styles.adminHeroBadges}>
+                <View style={styles.adminBadge}>
+                  <Text style={styles.adminBadgeText}>{isAdmin ? (profile?.role ?? 'admin') : 'member'}</Text>
+                </View>
+                <View style={styles.adminBadgeMuted}>
+                  <Text style={styles.adminBadgeMutedText}>{activeSeason?.name ?? '시즌 미선택'}</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.adminStatusGrid}>
+              {statusCards.map((card) => (
+                <View key={card.key} style={styles.adminStatusCard}>
+                  <Text style={styles.adminStatusLabel}>{card.label}</Text>
+                  <Text
+                    style={[
+                      styles.adminStatusValue,
+                      card.tone === 'neon' && styles.adminStatusValueNeon,
+                      card.tone === 'accent' && styles.adminStatusValueAccent,
+                    ]}
+                  >
+                    {card.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionTitle}>QUICK ACTIONS</Text>
+          </View>
+          <View style={styles.adminCardGrid}>
+            {menuItems.map((item) => (
+              <TouchableOpacity
+                key={item.key}
+                style={[styles.adminActionCard, !item.enabled && styles.adminActionCardDisabled]}
+                onPress={item.onPress}
+                disabled={!item.onPress}
+              >
+                <View style={styles.adminActionTop}>
+                  <MaterialCommunityIcons
+                    name={item.icon}
+                    size={24}
+                    color={item.onPress ? colors.accent : colors.sub}
+                  />
+                  <Text style={styles.adminActionBadge}>{item.badge}</Text>
+                </View>
+                <Text style={styles.adminActionTitle}>{item.title}</Text>
+                <Text style={styles.adminActionDescription}>{item.description}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionTitle}>SEASON OPERATIONS</Text>
+          </View>
+          <View style={styles.adminSeasonPanel}>
+            <View style={styles.adminSeasonPanelHeader}>
+              <View>
+                <Text style={styles.noticeTitle}>시즌 관리</Text>
+                <Text style={styles.noticeText}>
+                  팀 관리와 경기 관리는 독립 메뉴가 아니라 선택된 시즌 아래에서만 진입합니다.
+                </Text>
+              </View>
+              <View style={styles.adminBadgeMuted}>
+                <Text style={styles.adminBadgeMutedText}>{activeSeason?.name ?? '시즌 미선택'}</Text>
+              </View>
+            </View>
+
+            <View style={styles.adminSeasonActionRow}>
+              <TouchableOpacity
+                style={[styles.adminSeasonActionButton, !activeSeason && styles.adminSeasonActionButtonDisabled]}
+                onPress={() => onNavigate('teams')}
+                disabled={!activeSeason}
+              >
+                <MaterialCommunityIcons name="shield-outline" size={18} color={activeSeason ? colors.accent : colors.sub} />
+                <View style={styles.adminSeasonActionTextWrap}>
+                  <Text style={styles.adminSeasonActionTitle}>팀 관리</Text>
+                  <Text style={styles.adminSeasonActionMeta}>{teams.length}개 팀</Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.adminSeasonActionButton, !activeSeason && styles.adminSeasonActionButtonDisabled]}
+                onPress={() => onNavigate('schedule')}
+                disabled={!activeSeason}
+              >
+                <MaterialCommunityIcons name="soccer" size={18} color={activeSeason ? colors.accent : colors.sub} />
+                <View style={styles.adminSeasonActionTextWrap}>
+                  <Text style={styles.adminSeasonActionTitle}>경기 관리</Text>
+                  <Text style={styles.adminSeasonActionMeta}>{schedules.length}경기</Text>
+                </View>
+              </TouchableOpacity>
+
+              <View style={[styles.adminSeasonActionButton, styles.adminSeasonActionButtonDisabled]}>
+                <MaterialCommunityIcons name="send-outline" size={18} color={colors.sub} />
+                <View style={styles.adminSeasonActionTextWrap}>
+                  <Text style={styles.adminSeasonActionTitle}>푸시 발송</Text>
+                  <Text style={styles.adminSeasonActionMeta}>준비 중</Text>
+                </View>
+              </View>
+            </View>
+
+            {!activeSeason && (
+              <Text style={styles.adminSeasonHint}>
+                활성 시즌이 있어야 팀 관리와 경기 관리로 진입할 수 있습니다.
+              </Text>
+            )}
+          </View>
+
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionTitle}>OPERATIONS</Text>
+          </View>
+          <View style={[styles.adminInsightGrid, isWebDesktop && styles.adminInsightGridDesktop]}>
+            <View style={styles.adminInsightCard}>
+              <Text style={styles.noticeTitle}>공지 운영</Text>
+              <Text style={styles.noticeText}>
+                공지는 시즌과 분리된 전역 데이터로 유지하고, 작성과 수정은 관리자 메뉴에서만 처리합니다.
+              </Text>
+              <Text style={styles.footerLink}>
+                {recentNotice ? `최근 공지: ${recentNotice.title}` : '등록된 공지가 없습니다.'}
+              </Text>
+            </View>
+
+            <View style={styles.adminInsightCard}>
+              <Text style={styles.noticeTitle}>시즌 운영</Text>
+              <Text style={styles.noticeText}>
+                팀 관리와 경기 관리는 모두 시즌 문맥 안에서 이어지도록 설계합니다.
+              </Text>
+              <Text style={styles.footerLink}>
+                {upcomingMatch
+                  ? `다음 경기: ${upcomingMatch.homeTeam} vs ${upcomingMatch.awayTeam}`
+                  : '예정 경기가 없습니다.'}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function SeasonManagementScreen({
+  activeSeason,
+  seasons,
+  seasonForm,
+  isCreatingSeason,
+  onChangeSeasonForm,
+  onCreateSeason,
+  onOpenSeason,
+  goBack,
+}: {
+  activeSeason: Season | null;
+  seasons: Season[];
+  seasonForm: SeasonForm;
+  isCreatingSeason: boolean;
+  onChangeSeasonForm: React.Dispatch<React.SetStateAction<SeasonForm>>;
+  onCreateSeason: () => void;
+  onOpenSeason: (season: Season) => void;
+  goBack: () => void;
+}) {
+  return (
+    <View style={styles.card}>
+      <TouchableOpacity onPress={goBack}>
+        <Text style={styles.link}>{'< Back'}</Text>
+      </TouchableOpacity>
+      <Text style={styles.logoTitle}>시즌 관리</Text>
+      <Text style={styles.muted}>
+        시즌 등록과 시즌별 운영은 관리자 대시보드 하단이 아니라 이 전용 화면에서만 처리합니다.
+      </Text>
+
+      <View style={styles.adminSeasonPanel}>
+        <View style={styles.adminSeasonPanelHeader}>
+          <View>
+            <Text style={styles.noticeTitle}>시즌 등록</Text>
+            <Text style={styles.noticeText}>
+              시즌명과 시즌 설명을 등록하면 이후 팀 관리와 경기 일정 관리가 이 시즌에 종속됩니다.
+            </Text>
+          </View>
+          <View style={styles.adminBadge}>
+            <Text style={styles.adminBadgeText}>{seasons.length}개 시즌</Text>
+          </View>
+        </View>
+
+        <View style={styles.adminFormCard}>
+          <Label text="시즌명" />
+          <Input
+            value={seasonForm.name}
+            onChangeText={(value) => onChangeSeasonForm((prev) => ({ ...prev, name: value }))}
+            placeholder="예: 2026 Spring League"
+          />
+
+          <Label text="시즌 설명" required={false} />
+          <Input
+            value={seasonForm.description}
+            onChangeText={(value) => onChangeSeasonForm((prev) => ({ ...prev, description: value }))}
+            placeholder="운영 목적, 참가 팀 범위, 시즌 특징 등을 입력하세요."
+            multiline
+            numberOfLines={4}
+            style={styles.textArea}
+          />
+
+          <TouchableOpacity
+            style={[styles.primaryButton, isCreatingSeason && styles.buttonDisabled]}
+            onPress={onCreateSeason}
+            disabled={isCreatingSeason}
+          >
+            <Text style={styles.primaryButtonText}>
+              {isCreatingSeason ? '시즌 등록 중...' : '시즌 등록'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.adminSeasonPanel}>
+        <View style={styles.adminSeasonPanelHeader}>
+          <View>
+            <Text style={styles.noticeTitle}>등록된 시즌</Text>
+            <Text style={styles.noticeText}>시즌을 누르면 해당 시즌 운영 페이지로 이동합니다.</Text>
+          </View>
+          <View style={styles.adminBadgeMuted}>
+            <Text style={styles.adminBadgeMutedText}>{activeSeason?.name ?? '활성 시즌 없음'}</Text>
+          </View>
+        </View>
+
+        <View style={styles.adminSeasonList}>
+          {seasons.map((season) => (
+            <TouchableOpacity key={season.id} style={styles.adminSeasonListItem} onPress={() => onOpenSeason(season)}>
+              <View style={styles.adminSeasonListHeader}>
+                <Text style={styles.adminSeasonListTitle}>{season.name}</Text>
+                <View
+                      style={[
+                        styles.adminSeasonStatusBadge,
+                        season.status === 'active' && styles.adminSeasonStatusBadgeActive,
+                        season.status === 'inactive' && styles.adminSeasonStatusBadgeInactive,
+                      ]}
+                >
+                  <Text style={styles.adminSeasonStatusText}>{season.status.toUpperCase()}</Text>
+                </View>
+              </View>
+              <Text style={styles.adminSeasonListDescription}>
+                {season.description?.trim() || '시즌 설명이 아직 등록되지 않았습니다.'}
+              </Text>
+              <Text style={styles.adminSeasonListMeta}>
+                {season.status === 'active'
+                  ? '현재 팀 관리와 경기 일정 관리는 이 시즌을 기준으로 동작합니다.'
+                  : 'inactive 시즌입니다. 운영 페이지에서 active로 전환할 수 있습니다.'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+
+          {seasons.length === 0 && (
+            <Text style={styles.adminSeasonHint}>
+              아직 시즌이 없습니다. 첫 시즌을 등록하면 활성 시즌으로 바로 사용됩니다.
+            </Text>
+          )}
+        </View>
+      </View>
+
+    </View>
+  );
+}
+
+function SeasonOperationsScreen({
+  season,
+  activeSeason,
+  schedules,
+  teams,
+  onUpdateSeasonStatus,
+  onNavigate,
+  goBack,
+}: {
+  season: Season;
+  activeSeason: Season | null;
+  schedules: MatchSchedule[];
+  teams: Team[];
+  onUpdateSeasonStatus: (season: Season, nextStatus: Season['status']) => void;
+  onNavigate: React.Dispatch<React.SetStateAction<Screen>>;
+  goBack: () => void;
+}) {
+  const isActiveSeason = activeSeason?.id === season.id;
+
+  return (
+    <View style={styles.card}>
+      <TouchableOpacity onPress={goBack}>
+        <Text style={styles.link}>{'< Back'}</Text>
+      </TouchableOpacity>
+      <Text style={styles.logoTitle}>{season.name}</Text>
+      <Text style={styles.muted}>
+        {season.description?.trim() || '시즌 설명이 아직 등록되지 않았습니다.'}
+      </Text>
+
+      <View style={styles.adminSeasonPanel}>
+        <View style={styles.adminSeasonPanelHeader}>
+          <View>
+            <Text style={styles.noticeTitle}>시즌 운영</Text>
+            <Text style={styles.noticeText}>
+              팀 관리와 경기 관리는 등록된 시즌을 선택한 뒤 이 전용 페이지에서 이동합니다.
+            </Text>
+          </View>
+          <View
+            style={[
+              styles.adminSeasonStatusBadge,
+              season.status === 'active' && styles.adminSeasonStatusBadgeActive,
+              season.status === 'inactive' && styles.adminSeasonStatusBadgeInactive,
+            ]}
+          >
+            <Text style={styles.adminSeasonStatusText}>{season.status.toUpperCase()}</Text>
+          </View>
+        </View>
+
+        <View style={styles.adminSeasonActionRow}>
+          <TouchableOpacity
+            style={styles.adminSeasonActionButton}
+            onPress={() => onUpdateSeasonStatus(season, isActiveSeason ? 'inactive' : 'active')}
+          >
+            <MaterialCommunityIcons
+              name={isActiveSeason ? 'toggle-switch-off-outline' : 'toggle-switch-outline'}
+              size={18}
+              color={colors.accent}
+            />
+            <View style={styles.adminSeasonActionTextWrap}>
+              <Text style={styles.adminSeasonActionTitle}>{isActiveSeason ? 'Inactive 변경' : 'Active 변경'}</Text>
+              <Text style={styles.adminSeasonActionMeta}>
+                {isActiveSeason
+                  ? '일반 사용자 화면에서 이 시즌 노출을 중지합니다.'
+                  : '기존 active 시즌은 자동으로 inactive 처리됩니다.'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.adminSeasonActionButton, !isActiveSeason && styles.adminSeasonActionButtonDisabled]}
+            onPress={() => onNavigate('teams')}
+            disabled={!isActiveSeason}
+          >
+            <MaterialCommunityIcons name="shield-outline" size={18} color={isActiveSeason ? colors.accent : colors.sub} />
+            <View style={styles.adminSeasonActionTextWrap}>
+              <Text style={styles.adminSeasonActionTitle}>팀 관리</Text>
+              <Text style={styles.adminSeasonActionMeta}>{isActiveSeason ? `${teams.length}개 팀` : '활성 시즌에서만 사용'}</Text>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.adminSeasonActionButton, !isActiveSeason && styles.adminSeasonActionButtonDisabled]}
+            onPress={() => onNavigate('schedule')}
+            disabled={!isActiveSeason}
+          >
+            <MaterialCommunityIcons name="soccer" size={18} color={isActiveSeason ? colors.accent : colors.sub} />
+            <View style={styles.adminSeasonActionTextWrap}>
+              <Text style={styles.adminSeasonActionTitle}>경기 관리</Text>
+              <Text style={styles.adminSeasonActionMeta}>{isActiveSeason ? `${schedules.length}경기` : '활성 시즌에서만 사용'}</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {!isActiveSeason && (
+          <Text style={styles.adminSeasonHint}>
+            현재 일반 사용자 화면은 active 시즌 기준으로만 데이터를 노출합니다. 이 시즌을 운영하려면 먼저 active로 전환하세요.
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+}
+
 function Label({ text, required = true }: { text: string; required?: boolean }) {
   return <Text style={styles.label}>{required ? `${text} *` : text}</Text>;
 }
@@ -1425,6 +2244,313 @@ const styles = StyleSheet.create({
   homeShell: {
     flex: 1,
     backgroundColor: colors.bg,
+  },
+  adminShell: {
+    gap: 14,
+  },
+  adminLayout: {
+    gap: 16,
+  },
+  adminLayoutDesktop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  adminSidebar: {
+    width: 260,
+    backgroundColor: colors.surface,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#24441f',
+    padding: 18,
+    gap: 12,
+    alignSelf: 'stretch',
+  },
+  adminSidebarEyebrow: {
+    color: colors.neon,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.6,
+  },
+  adminSidebarTitle: {
+    color: colors.text,
+    fontSize: 24,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  adminSidebarItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: '#1f3a22',
+    borderRadius: 16,
+    padding: 14,
+  },
+  adminSidebarItemBody: {
+    flex: 1,
+  },
+  adminSidebarItemTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  adminSidebarItemMeta: {
+    color: colors.sub,
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  adminMain: {
+    flex: 1,
+    gap: 16,
+  },
+  adminHero: {
+    backgroundColor: colors.card,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#24441f',
+    padding: 20,
+    gap: 18,
+  },
+  adminHeroHeader: {
+    gap: 12,
+  },
+  adminHeroBadges: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  adminBadge: {
+    borderRadius: 999,
+    backgroundColor: '#17351b',
+    borderWidth: 1,
+    borderColor: '#2e6f28',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  adminBadgeText: {
+    color: colors.neon,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  adminBadgeMuted: {
+    borderRadius: 999,
+    backgroundColor: '#101924',
+    borderWidth: 1,
+    borderColor: '#294352',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  adminBadgeMutedText: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  adminStatusGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  adminStatusCard: {
+    flexGrow: 1,
+    minWidth: 180,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#1f3a22',
+    padding: 16,
+    gap: 8,
+  },
+  adminStatusLabel: {
+    color: colors.sub,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  adminStatusValue: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  adminStatusValueNeon: {
+    color: colors.neon,
+  },
+  adminStatusValueAccent: {
+    color: colors.accent,
+  },
+  adminCardGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  adminActionCard: {
+    flexGrow: 1,
+    minWidth: 220,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#24441f',
+    padding: 16,
+    minHeight: 150,
+    gap: 12,
+  },
+  adminActionCardDisabled: {
+    opacity: 0.7,
+  },
+  adminActionTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  adminActionBadge: {
+    color: colors.sub,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  adminActionTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  adminActionDescription: {
+    color: colors.sub,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  adminInsightGrid: {
+    gap: 12,
+  },
+  adminInsightGridDesktop: {
+    flexDirection: 'row',
+  },
+  adminInsightCard: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#24441f',
+    padding: 18,
+  },
+  adminSeasonPanel: {
+    backgroundColor: colors.surface,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: '#24441f',
+    padding: 18,
+    gap: 14,
+  },
+  adminSeasonPanelHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  adminSeasonActionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  adminSeasonActionButton: {
+    flexGrow: 1,
+    minWidth: 220,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#1f3a22',
+    padding: 16,
+  },
+  adminSeasonActionButtonDisabled: {
+    opacity: 0.6,
+  },
+  adminSeasonActionTextWrap: {
+    flex: 1,
+  },
+  adminSeasonActionTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  adminSeasonActionMeta: {
+    color: colors.sub,
+    fontSize: 12,
+    marginTop: 4,
+    fontWeight: '700',
+  },
+  adminSeasonHint: {
+    color: colors.sub,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  adminFormCard: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#1f3a22',
+    padding: 16,
+    gap: 10,
+  },
+  adminSeasonList: {
+    gap: 10,
+  },
+  adminSeasonListItem: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#1f3a22',
+    padding: 16,
+    gap: 8,
+  },
+  adminSeasonListHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+    alignItems: 'center',
+  },
+  adminSeasonListTitle: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  adminSeasonListDescription: {
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  adminSeasonListMeta: {
+    color: colors.sub,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  adminSeasonStatusBadge: {
+    borderRadius: 999,
+    backgroundColor: '#2f2611',
+    borderWidth: 1,
+    borderColor: '#7d6521',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  adminSeasonStatusBadgeActive: {
+    backgroundColor: '#17351b',
+    borderColor: '#2e6f28',
+  },
+  adminSeasonStatusBadgeInactive: {
+    backgroundColor: '#2a1620',
+    borderColor: '#6f2845',
+  },
+  adminSeasonStatusText: {
+    color: colors.text,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  textArea: {
+    minHeight: 96,
+    textAlignVertical: 'top',
+    paddingTop: 14,
   },
   homeContent: {
     paddingHorizontal: 16,
@@ -1939,6 +3065,17 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
+  noticeActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  noticeDeleteLink: {
+    color: '#f87171',
+    fontSize: 13,
+    fontWeight: '800',
+  },
   genderChip: {
     flex: 1,
     backgroundColor: '#222222',
@@ -2073,10 +3210,12 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     color: colors.neon,
-    fontSize: 24,
+    fontSize: 20,
     fontWeight: '900',
     fontStyle: 'italic',
     textAlign: 'center',
+    letterSpacing: -0.2,
+    marginBottom: 14,
   },
   modalMessage: {
     color: colors.text,
@@ -2090,13 +3229,13 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: colors.neon,
     borderRadius: 14,
-    paddingVertical: 14,
+    paddingVertical: 11,
     alignItems: 'center',
   },
   modalButtonText: {
     color: colors.bg,
     fontWeight: '900',
-    fontSize: 15,
+    fontSize: 14,
     letterSpacing: 0.4,
   },
 });

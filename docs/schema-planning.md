@@ -89,6 +89,7 @@
 - `id bigserial primary key`
 - `title text not null`
 - `body text`
+- `file_path text`
 - `file_url text`
 - `author_id uuid`
 - `created_at timestamptz default now()`
@@ -97,12 +98,12 @@
 
 - 공지사항은 시즌 비종속 데이터입니다.
 - 일반 사용자는 조회만 하고, 관리자는 등록합니다.
-- 첨부 파일은 별도 Storage 버킷에 저장하고 URL 또는 경로를 기록합니다.
+- 첨부 파일은 별도 Storage 버킷에 저장하고, DB에는 Storage 경로를 기준값으로 기록합니다.
 
 메모:
 
 - 현재 구조를 유지해도 됩니다.
-- 추후 필요하면 `file_path`를 추가해서 Storage 경로까지 함께 관리할 수 있습니다.
+- `file_path`를 기준값으로 사용하고, `file_url`은 공개 링크 또는 하위 호환 용도로 유지할 수 있습니다.
 
 ## 4. seasons
 
@@ -112,8 +113,9 @@
 
 - `id bigserial primary key`
 - `name text not null`
+- `description text`
 - `slug text not null unique`
-- `status text not null default 'draft'`
+- `status text not null default 'inactive'`
 - `starts_at date`
 - `ends_at date`
 - `created_by uuid`
@@ -122,7 +124,9 @@
 설명:
 
 - 시즌 생성은 관리자 기능입니다.
-- `status`는 `draft`, `active`, `closed` 정도로 시작하는 것을 권장합니다.
+- 시즌 생성 시 최소 입력값은 `name`, `description`입니다.
+- `status`는 `active`, `inactive` 두 값으로 운영합니다.
+- 동시에 `active` 상태인 시즌은 하나만 허용합니다.
 - 팀, 경기, 푸쉬 이력은 모두 시즌을 기준으로 연결합니다.
 
 ## 5. teams
@@ -240,8 +244,8 @@
 ### 2) 공지 첨부 파일
 - 버킷: `notice-files`
 - 용도: 공지사항 첨부 파일
-- DB 저장값: `notices.file_url`
-- 필요 시 추후 `file_path` 추가 가능
+- DB 저장값: `notices.file_path`를 기준값으로 사용
+- `notices.file_url`은 공개 링크 캐시 또는 하위 호환 용도로 유지 가능
 
 ## 권한 기준
 
