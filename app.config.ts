@@ -1,6 +1,11 @@
 import 'dotenv/config';
 import { ExpoConfig, ConfigContext } from 'expo/config';
 
+const easProjectId =
+  process.env.EXPO_PUBLIC_EAS_PROJECT_ID
+  ?? process.env.EAS_PROJECT_ID
+  ?? undefined;
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: 'expo-supabase-starter',
@@ -17,12 +22,20 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     SUPABASE_URL: process.env.EXPO_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '',
     SUPABASE_ANON_KEY:
       process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? process.env.SUPABASE_ANON_KEY ?? '',
-    eas: {
-      projectId: 'CHANGE_ME_BEFORE_BUILD',
-    },
+    ...(easProjectId
+      ? {
+          eas: {
+            projectId: easProjectId,
+          },
+        }
+      : {}),
   },
   ios: {
     supportsTablet: true,
+    bundleIdentifier: 'com.alimajung2.exposupabasestarter',
+    infoPlist: {
+      ITSAppUsesNonExemptEncryption: false,
+    },
   },
   android: {
     permissions: ['NOTIFICATIONS'],

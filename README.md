@@ -95,6 +95,21 @@ create policy "Update own tokens" on public.push_tokens
 - Storage 버킷 `notice-files`를 public bucket으로 생성하세요.
 - 앱은 선택한 파일을 `notice-files/<user-id>/...` 경로로 업로드한 뒤 `public.notices`에 `title`, `body`, `file_path`, `file_url`, `author_id`를 저장합니다.
 
+## 9) Supabase MCP 연결 오류 대응
+`OAuth token refresh failed: Failed to parse server response`가 나오면 OAuth 갱신 대신 Bearer 토큰 방식으로 연결하세요.
+
+1. Supabase Dashboard에서 Personal Access Token(PAT)을 발급합니다.
+2. Codex를 실행하는 셸에 토큰을 설정합니다.
+
+```bash
+export SUPABASE_ACCESS_TOKEN="<your_supabase_pat>"
+```
+
+3. 이 저장소의 `.mcp.json`은 이미 아래 방식으로 설정되어 있습니다.
+   - `url`: `https://mcp.supabase.com/mcp?project_ref=...`
+   - `bearer_token_env_var`: `SUPABASE_ACCESS_TOKEN`
+4. Codex를 재시작하고 `/mcp`로 `supabase` 상태를 확인합니다.
+
 서버에서 발송하기 (예: Supabase Edge Functions / Node 서버)
 - Expo Push API endpoint: `https://exp.host/--/api/v2/push/send`
 - 요청 예시:

@@ -18,13 +18,19 @@
 초기 구현은 `member`와 `admin` 2단계로 시작할 수 있고, 이후 사용자 관리나 권한 위임이 필요해지면 `super_admin`을 추가합니다.
 
 ## 권한 기준값
-권한 판별은 `public.profiles`에 역할 컬럼을 추가해서 처리하는 방식을 기본안으로 사용합니다.
+권한 판별은 `public.profiles`의 권한/회원 상태/부서 컬럼을 기준으로 처리하는 방식을 기본안으로 사용합니다.
 
 예시:
 
 ```sql
 alter table public.profiles
 add column role text not null default 'member';
+
+alter table public.profiles
+add column status text not null default 'active';
+
+alter table public.profiles
+add column department text;
 ```
 
 권장 값:
@@ -32,12 +38,33 @@ add column role text not null default 'member';
 - `admin`
 - `super_admin`
 
+회원 상태 값:
+- `active`
+- `inactive`
+
+부서 값:
+- `1부`
+- `2부`
+- `3부`
+- `4부`
+
 가능하면 체크 제약도 함께 둡니다.
 
 ```sql
 alter table public.profiles
 add constraint profiles_role_check
 check (role in ('member', 'admin', 'super_admin'));
+
+alter table public.profiles
+add constraint profiles_status_check
+check (status in ('active', 'inactive'));
+
+alter table public.profiles
+add constraint profiles_department_check
+check (
+  department is null
+  or department in ('1부', '2부', '3부', '4부')
+);
 ```
 
 ## 메뉴별 권한 기준
@@ -60,6 +87,9 @@ check (role in ('member', 'admin', 'super_admin'));
 - 팀 정보 등록/수정 가능
 - 리그 테이블 수정 가능
 - 메인화면 관리자 전용 메뉴 접근 가능
+- 회원 관리 메뉴 접근 가능
+- 회원 `department` 변경 가능
+- 회원 `active`/`inactive` 상태 변경 가능
 
 ### 최고 관리자(`super_admin`)
 - 운영 관리자 권한 모두 포함
@@ -76,7 +106,7 @@ check (role in ('member', 'admin', 'super_admin'));
 ### 관리자 화면
 - 홈 상단 헤더에 관리자 전용 톱니 버튼을 노출합니다.
 - 관리자 페이지 진입은 이 톱니 버튼을 기준 동선으로 사용합니다.
-- 예: 톱니 버튼 → `관리자 메뉴`, `공지 등록`, `경기 등록`, `리그 수정`
+- 예: 톱니 버튼 → `관리자 메뉴`, `공지 등록`, `경기 등록`, `리그 수정`, `회원 관리`
 
 ## 숨김과 차단 원칙
 - 일반 사용자는 관리자 메뉴를 기본적으로 보지 않게 합니다.
@@ -93,23 +123,28 @@ check (role in ('member', 'admin', 'super_admin'));
 - 권한 없으면 `권한이 없습니다` 안내 후 이전 화면 또는 홈으로 이동
 
 ## Supabase 적용 권장 사항
-- `profiles.role` 조회는 로그인 직후 프로필 로딩 시 함께 가져옵니다.
+- `profiles.role`, `profiles.status`, `profiles.department` 조회는 로그인 직후 프로필 로딩 시 함께 가져옵니다.
 - `notices`, `matches`, `teams`, `league_table`의 쓰기 권한은 `admin` 이상만 허용하도록 정책을 둡니다.
 - 사용자 역할 수정은 `super_admin` 또는 서버 전용 로직에서만 처리합니다.
+- `profiles.status = 'inactive'` 사용자는 로그인/앱 기능을 차단하는 정책을 둡니다.
+- 회원 `department`와 `status` 수정은 `admin` 이상만 허용합니다.
 
 예시 방향:
 - 조회 정책: `authenticated` 사용자 허용
 - 쓰기 정책: `profiles.role in ('admin', 'super_admin')`
 
 실제 RLS에서는 `auth.uid()` 기준으로 현재 사용자 프로필의 역할을 조회하도록 설계합니다.
+실제 RLS에서는 `auth.uid()` 기준으로 현재 사용자 프로필의 `role`, `status`를 함께 조회하도록 설계합니다.
 
 ## 앱 구현 기준
-- 로그인 후 `profiles`에서 `name`, `gender`와 함께 `role`도 로드합니다.
+- 로그인 후 `profiles`에서 `name`, `gender`, `role`, `status`, `department`를 함께 로드합니다.
 - 로그인 성공 후 첫 화면은 항상 홈으로 통일합니다.
 - 홈 메인화면은 `role`에 따라 상단 관리자 톱니 노출 여부를 분기합니다.
 - 관리자 페이지 진입은 홈 상단 톱니 버튼으로만 처리합니다.
 - 공지 업로드 버튼은 `admin` 이상에서만 렌더링합니다.
+- 회원 관리 화면에서 `admin`은 `department`/`status`를 변경하고 `super_admin`은 `role`까지 변경합니다.
 - 추후 경기 등록, 팀 관리, 리그 수정 화면도 동일한 기준을 재사용합니다.
+- `status = inactive` 사용자는 로그인 성공 이후에도 홈 진입 전에 차단 안내 후 로그아웃 처리합니다.
 
 ## 우선 적용 권한안
 초기 버전에서는 아래처럼 단순하게 적용합니다.

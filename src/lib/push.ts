@@ -12,6 +12,21 @@ export type PushTokenRow = {
   created_at: string;
 };
 
+export type PushRegistrationStatus =
+  | 'idle'
+  | 'checking'
+  | 'unsupported'
+  | 'simulator'
+  | 'denied'
+  | 'registered'
+  | 'error';
+
+export type PushRegistrationResult = {
+  status: PushRegistrationStatus;
+  token: string | null;
+  message: string;
+};
+
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -22,17 +37,56 @@ Notifications.setNotificationHandler({
   }),
 });
 
+const getProjectId = () =>
+  (Constants.expoConfig?.extra?.eas?.projectId as string | undefined)
+  ?? Constants.easConfig?.projectId;
+
+const isValidProjectId = (projectId?: string | null) =>
+  Boolean(projectId && projectId !== 'CHANGE_ME_BEFORE_BUILD');
+
+async function ensureAndroidNotificationChannel() {
+  if (Platform.OS !== 'android') {
+    return;
+  }
+
+  await Notifications.setNotificationChannelAsync('default', {
+    name: 'default',
+    importance: Notifications.AndroidImportance.MAX,
+    vibrationPattern: [0, 250, 250, 250],
+    lightColor: '#22c55e',
+  });
+}
+
 /**
  * Ask permission, get Expo push token, and persist to Supabase `push_tokens` table.
  */
-export async function registerForPush() {
-  if (!supabase) return null;
-  if (Platform.OS === 'web') return null;
+export async function registerForPush(): Promise<PushRegistrationResult> {
+  if (!supabase) {
+    return {
+      status: 'error',
+      token: null,
+      message: 'Supabase 설정이 없어 푸시 토큰을 저장할 수 없습니다.',
+    };
+  }
+  if (Platform.OS === 'web') {
+    return {
+      status: 'unsupported',
+      token: null,
+      message: '푸시 알림은 iOS/Android 앱에서만 지원됩니다.',
+    };
+  }
 
   if (!Device.isDevice) {
-    console.warn('Push notifications require a physical device');
-    return null;
+    const message = '푸시 알림은 실제 디바이스에서만 테스트할 수 있습니다.';
+    console.warn(message);
+    return {
+      status: 'simulator',
+      token: null,
+      message,
+    };
   }
+
+  await ensureAndroidNotificationChannel();
 
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
@@ -43,21 +97,54 @@ export async function registerForPush() {
   }
 
   if (finalStatus !== 'granted') {
-    console.warn('Push permission not granted');
-    return null;
+    const message = '알림 권한이 거부되었습니다. 시스템 설정에서 알림을 허용하세요.';
+    console.warn(message);
+    return {
+      status: 'denied',
+      token: null,
+      message,
+    };
   }
 
-  const projectId = Constants.expoConfig?.extra?.eas?.projectId as string | undefined;
-  const token = (
-    await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined)
-  ).data;
-  if (!token) return null;
+  const projectId = getProjectId();
+  if (!isValidProjectId(projectId)) {
+    return {
+      status: 'error',
+      token: null,
+      message: 'Expo EAS projectId가 설정되지 않아 푸시 토큰을 발급할 수 없습니다.',
+    };
+  }
+
+  let token: string;
+  try {
+    token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+  } catch (error) {
+    return {
+      status: 'error',
+      token: null,
+      message: error instanceof Error ? error.message : 'Expo Push Token 발급에 실패했습니다.',
+    };
+  }
+
+  if (!token) {
+    return {
+      status: 'error',
+      token: null,
+      message: 'Expo Push Token이 비어 있습니다.',
+    };
+  }
 
   const platform = Platform.OS;
 
   // Persist to Supabase (auth user required)
   const { data: user } = await supabase.auth.getUser();
-  if (!user?.user) return token;
+  if (!user?.user) {
+    return {
+      status: 'error',
+      token,
+      message: '로그인 사용자 정보를 찾지 못해 push_tokens 저장을 건너뛰었습니다.',
+    };
+  }
 
   const { error } = await supabase.from('push_tokens').upsert(
     {
@@ -70,7 +157,18 @@ export async function registerForPush() {
     }
   );
 
-  if (error) console.warn('Failed to save push token', error.message);
+  if (error) {
+    console.warn('Failed to save push token', error.message);
+    return {
+      status: 'error',
+      token,
+      message: `push_tokens 저장 실패: ${error.message}`,
+    };
+  }
 
-  return token;
+  return {
+    status: 'registered',
+    token,
+    message: '푸시 토큰을 발급하고 계정에 연결했습니다.',
+  };
 }

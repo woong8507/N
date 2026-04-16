@@ -45,6 +45,8 @@
 - `name text not null`
 - `gender text`
 - `role text not null default 'member'`
+- `status text not null default 'active'`
+- `department text`
 - `auto_login boolean default true`
 - `avatar_path text`
 - `created_at timestamptz default now()`
@@ -53,8 +55,16 @@
 
 - `id`는 `auth.users(id)`를 참조합니다.
 - `role`은 `member`, `admin`, `super_admin`만 허용합니다.
+- `status`는 `active`, `inactive`만 허용합니다.
+- `department`는 `1부`, `2부`, `3부`, `4부`만 허용하고, 미지정 상태를 위해 `null` 허용을 권장합니다.
 - `avatar_path`는 Supabase Storage 파일 경로를 저장합니다.
 - 프로필 사진 원본 파일은 DB에 저장하지 않습니다.
+
+권장 제약:
+
+- `profiles_role_check`: `role in ('member', 'admin', 'super_admin')`
+- `profiles_status_check`: `status in ('active', 'inactive')`
+- `profiles_department_check`: `department is null or department in ('1부', '2부', '3부', '4부')`
 
 프로필 이미지 정책:
 
@@ -260,6 +270,8 @@
 - 조회: 로그인 사용자 허용
 - 생성/수정/삭제: `admin`, `super_admin`만 허용
 - 권한 관리: 추후 `super_admin` 전용으로 확장
+- 회원 상태 `inactive` 사용자는 로그인/사용 흐름에서 차단
+- 회원 `department`/`status` 수정은 관리자 메뉴 `회원 관리`에서만 수행
 
 중요:
 
@@ -304,4 +316,6 @@
 4. 공지사항은 시즌과 무관한 전역 데이터입니다.
 5. 시즌, 팀 등록, 경기 스케줄, 경기 푸쉬 발송은 모두 시즌 기준으로 관리합니다.
 6. 관리자 권한은 `profiles.role`로 판별합니다.
-7. 실제 DB 쓰기 권한은 관리자만 허용하도록 RLS를 설계합니다.
+7. 회원 활성 상태는 `profiles.status`로 판별하고 `inactive` 사용자는 차단합니다.
+8. 회원 부서는 `profiles.department`(`1부~4부`)로 관리합니다.
+9. 실제 DB 쓰기 권한은 관리자만 허용하도록 RLS를 설계합니다.

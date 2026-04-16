@@ -16,6 +16,7 @@
     "dotenv": "^16.4.7",
     "expo": "~55.0.12",
     "expo-constants": "~55.0.9",
+    "expo-dev-client": "~55.0.24",
     "expo-device": "~55.0.12",
     "expo-document-picker": "~55.0.12",
     "expo-notifications": "~55.0.17",
