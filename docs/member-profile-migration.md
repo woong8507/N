@@ -74,13 +74,13 @@ Supabase 토큰이 아직 없는 상태에서, 약 17명의 회원 계정을 나
 권장 방식:
 
 1. 회원 계정 생성 완료
-2. 사진 파일을 Supabase Storage `profile-images` 버킷에 업로드
+2. 사진 파일을 Supabase Storage `profile_img` 버킷에 업로드
 3. 경로를 `profiles.avatar_path`에 저장
 
 예시 경로:
 
 ```text
-profile-images/<user-id>/avatar.jpg
+profile_img/Daehyun.png
 ```
 
 이번 단계에서는 아래 둘 중 하나를 선택하면 됩니다.

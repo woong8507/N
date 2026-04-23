@@ -1,26 +1,21 @@
 # DB 스키마 기획 정리
 
 ## 개요
-이 문서는 현재 메뉴 기획과 운영 정책을 기준으로, Supabase에 생성할 최종 테이블 구조를 정리합니다.
+이 문서는 현재 메뉴 기획과 운영 정책을 기준으로 Supabase 테이블 구조를 정리합니다.
 
 기준 문서:
-
 - `docs/menu-planning.md`
 - `docs/auth-flow.md`
 - `docs/admin-permissions.md`
+- `docs/calendar-event-planning.md`
 
 핵심 원칙:
-
-- `profiles`는 앱에서 사용하는 사용자 프로필 테이블입니다.
-- 실제 인증 계정 원본은 Supabase `auth.users`입니다.
-- 프로필 사진 파일은 DB가 아니라 Supabase Storage에 저장합니다.
-- 공지사항을 제외한 운영 데이터는 모두 시즌 기준으로 관리합니다.
-- 쓰기 권한은 `admin` 이상만 허용하는 구조를 기본으로 합니다.
+- 공지사항을 제외한 운영 데이터는 시즌 기준으로 관리합니다.
+- 통합 일정 조회는 `calendar_events`를 중심으로 처리합니다.
+- 경기 데이터 원본은 `matches`를 유지하고 캘린더 이벤트와 연결합니다.
+- 쓰기 권한은 기본적으로 `admin` 이상이되, 개인 일정은 본인 쓰기를 허용합니다.
 
 ## 전체 엔터티 구조
-
-초기 최종 테이블은 아래를 기준으로 설계합니다.
-
 1. `profiles`
 2. `push_tokens`
 3. `notices`
@@ -28,19 +23,11 @@
 5. `teams`
 6. `season_teams`
 7. `matches`
-8. `match_push_logs`
+8. `calendar_events`
+9. `match_push_logs`
 
 ## 1. profiles
-
-앱에서 사용하는 사용자 프로필 테이블입니다.
-
-원본 계정 관계:
-
-- `auth.users` = 인증 계정 원본
-- `public.profiles` = 앱 프로필 정보
-
 주요 컬럼:
-
 - `id uuid primary key`
 - `name text not null`
 - `gender text`
@@ -49,53 +36,24 @@
 - `department text`
 - `auto_login boolean default true`
 - `avatar_path text`
+- `is_deleted boolean not null default false`
 - `created_at timestamptz default now()`
 
-설명:
-
-- `id`는 `auth.users(id)`를 참조합니다.
-- `role`은 `member`, `admin`, `super_admin`만 허용합니다.
-- `status`는 `active`, `inactive`만 허용합니다.
-- `department`는 `1부`, `2부`, `3부`, `4부`만 허용하고, 미지정 상태를 위해 `null` 허용을 권장합니다.
-- `avatar_path`는 Supabase Storage 파일 경로를 저장합니다.
-- 프로필 사진 원본 파일은 DB에 저장하지 않습니다.
-
 권장 제약:
-
 - `profiles_role_check`: `role in ('member', 'admin', 'super_admin')`
 - `profiles_status_check`: `status in ('active', 'inactive')`
 - `profiles_department_check`: `department is null or department in ('1부', '2부', '3부', '4부')`
 
-프로필 이미지 정책:
-
-- Storage 버킷: `profile-images`
-- 저장 예시: `profile-images/<user-id>/avatar.jpg`
-- `profiles`에는 파일 경로만 저장합니다.
-
 ## 2. push_tokens
-
-모바일 푸쉬 알림 수신 토큰 저장 테이블입니다.
-
 주요 컬럼:
-
 - `id bigserial primary key`
 - `user_id uuid not null`
 - `token text not null`
 - `platform text`
 - `created_at timestamptz default now()`
 
-설명:
-
-- 사용자별 디바이스 푸쉬 토큰을 저장합니다.
-- `platform`은 `ios`, `android`만 허용합니다.
-- 동일 사용자와 동일 토큰 중복 저장은 unique 제약으로 막는 것을 권장합니다.
-
 ## 3. notices
-
-시즌과 무관한 전역 공지사항 테이블입니다.
-
 주요 컬럼:
-
 - `id bigserial primary key`
 - `title text not null`
 - `body text`
@@ -104,23 +62,8 @@
 - `author_id uuid`
 - `created_at timestamptz default now()`
 
-설명:
-
-- 공지사항은 시즌 비종속 데이터입니다.
-- 일반 사용자는 조회만 하고, 관리자는 등록합니다.
-- 첨부 파일은 별도 Storage 버킷에 저장하고, DB에는 Storage 경로를 기준값으로 기록합니다.
-
-메모:
-
-- 현재 구조를 유지해도 됩니다.
-- `file_path`를 기준값으로 사용하고, `file_url`은 공개 링크 또는 하위 호환 용도로 유지할 수 있습니다.
-
 ## 4. seasons
-
-시즌 운영의 기준이 되는 마스터 테이블입니다.
-
 주요 컬럼:
-
 - `id bigserial primary key`
 - `name text not null`
 - `description text`
@@ -131,42 +74,19 @@
 - `created_by uuid`
 - `created_at timestamptz default now()`
 
-설명:
-
-- 시즌 생성은 관리자 기능입니다.
-- 시즌 생성 시 최소 입력값은 `name`, `description`입니다.
-- `status`는 `active`, `inactive` 두 값으로 운영합니다.
-- 동시에 `active` 상태인 시즌은 하나만 허용합니다.
-- 팀, 경기, 푸쉬 이력은 모두 시즌을 기준으로 연결합니다.
+운영 규칙:
+- 동시에 `active` 시즌은 하나만 허용
+- 일반 사용자 노출 데이터는 active 시즌 기준
 
 ## 5. teams
-
-팀 마스터 테이블입니다.
-
 주요 컬럼:
-
 - `id bigserial primary key`
 - `name text not null`
 - `emblem_url text`
 - `created_at timestamptz default now()`
 
-설명:
-
-- 팀 자체의 기본 정보만 저장합니다.
-- 특정 시즌 참가 여부는 여기서 관리하지 않습니다.
-- 같은 팀이 여러 시즌에 반복 참가할 수 있도록 시즌 소속 정보는 분리합니다.
-
-정책:
-
-- 사용자 메뉴에서는 `팀 목록`만 조회합니다.
-- 팀 상세 화면은 현재 범위에서 제외합니다.
-
 ## 6. season_teams
-
-시즌별 참가 팀 매핑 테이블입니다.
-
 주요 컬럼:
-
 - `id bigserial primary key`
 - `season_id bigint not null`
 - `team_id bigint not null`
@@ -174,25 +94,19 @@
 - `created_at timestamptz default now()`
 
 제약:
-
 - `(season_id, team_id)` unique
 
-설명:
-
-- 한 팀이 여러 시즌에 참가할 수 있으므로 필수입니다.
-- 관리자 `팀 등록` 기능은 실제로는 이 테이블에 행을 추가하는 동작입니다.
-
 ## 7. matches
-
-시즌 기준 경기 스케줄 테이블입니다.
+시즌 기준 경기 원본 테이블입니다.
 
 주요 컬럼:
-
 - `id bigserial primary key`
 - `season_id bigint not null`
 - `match_date timestamptz not null`
+- `match_start_at timestamptz not null`
+- `match_end_at timestamptz not null`
 - `weekday text`
-- `place text not null`
+- `place text not null` (`3F`, `4F`)
 - `home_season_team_id bigint not null`
 - `away_season_team_id bigint not null`
 - `home_score int`
@@ -203,29 +117,70 @@
 - `created_at timestamptz default now()`
 
 설명:
+- 경기 등록은 관리자만 수행
+- `home_season_team_id`, `away_season_team_id`는 `season_teams` 참조
+- `match_start_at`, `match_end_at`는 캘린더 시간 표시와 충돌 확인 기준으로 사용
+- 화면 팀명은 `season_teams`를 통해 참조한 **Teams(`teams`) 테이블 `name` 필드**를 사용
+- `1팀`, `2팀` 같은 라벨은 저장/표시 기준으로 사용하지 않음
 
-- 경기 스케줄은 반드시 시즌에 속해야 합니다.
-- 홈팀과 원정팀은 `teams`가 아니라 `season_teams`를 참조하는 것을 권장합니다.
-- 이렇게 해야 시즌에 등록되지 않은 팀이 경기 데이터에 섞이지 않습니다.
-
-상태값 예시:
-
-- `scheduled`
-- `live`
-- `finished`
-- `cancelled`
-
-메모:
-
-- 기존 `home_players`, `away_players` 문자열 구조는 운영 데이터 기준으로는 제외합니다.
-- 현재 기획에서는 팀 단위 경기 운영에 집중합니다.
-
-## 8. match_push_logs
-
-경기 관련 푸쉬 발송 이력 테이블입니다.
+## 8. calendar_events
+통합 캘린더 조회 테이블입니다.
 
 주요 컬럼:
+- `id bigserial primary key`
+- `season_id bigint null`
+- `linked_match_id bigint null`
+- `event_type text not null`
+- `title text not null`
+- `description text`
+- `location_floor text`
+- `start_at timestamptz not null`
+- `end_at timestamptz not null`
+- `is_all_day boolean not null default false`
+- `source_type text not null default 'manual'`
+- `created_by uuid`
+- `created_at timestamptz default now()`
 
+이벤트 타입:
+- `holiday`
+- `match`
+- `leave`
+- `business_trip`
+- `personal`
+
+권장 제약:
+- `calendar_events_type_check`: `event_type in ('holiday','match','leave','business_trip','personal')`
+- `calendar_events_time_check`: `end_at > start_at`
+- `calendar_events_floor_check`: `location_floor is null or location_floor in ('3F','4F')`
+- `linked_match_id`는 `match` 이벤트에서만 사용
+
+시간 저장 운영 규칙:
+- 종일 일정(`holiday`, `leave`, `business_trip`, `personal`)은 KST 기준 `12:00`~`12:01`로 저장
+- 목적:
+  - `calendar_events_time_check (end_at > start_at)` 충족
+  - UTC 변환 시 날짜가 하루 전으로 밀리는 문제 방지
+- 경기 `match_date`는 KST 기준 정오(`12:00`) 앵커로 저장
+
+권장 인덱스:
+- `calendar_events_start_at_idx` on `(start_at)`
+- `calendar_events_type_idx` on `(event_type)`
+- `calendar_events_created_by_idx` on `(created_by)`
+- `calendar_events_season_id_idx` on `(season_id)`
+- `calendar_events_linked_match_id_uidx` unique where `linked_match_id is not null`
+
+연동 규칙:
+- `match`는 `matches` 변경 시 트리거/서버 로직으로 upsert
+- 개인 일정은 `calendar_events` 직접 작성
+- 공휴일은 동기화 작업으로 upsert
+- 관리자 수동 공휴일도 `calendar_events(event_type='holiday', source_type='manual')`로 저장
+- 경기 캘린더 제목/라벨은 `teams.name` 기반(`home_team_name vs away_team_name`)으로 동기화
+
+경기 등록 충돌 규칙(앱 레벨):
+- 경기일 공휴일 존재 시 팀 선택/저장 모두 차단
+- 참여 선수의 `leave|business_trip|personal` 일정이 경기일과 겹치면 충돌 처리
+
+## 9. match_push_logs
+주요 컬럼:
 - `id bigserial primary key`
 - `match_id bigint not null`
 - `season_id bigint not null`
@@ -236,86 +191,22 @@
 - `sent_by uuid`
 - `sent_at timestamptz default now()`
 
-설명:
-
-- 경기 스케줄 등록 후 발송한 푸쉬 이력을 남깁니다.
-- 누가 언제 어떤 경기 알림을 발송했는지 추적할 수 있어야 합니다.
-- 향후 실패 이력, 재발송 여부, 응답 로그를 붙일 수 있습니다.
-
 ## Storage 구조
-
-현재 기준 Storage는 아래처럼 사용합니다.
-
 ### 1) 프로필 이미지
-- 버킷: `profile-images`
-- 용도: 사용자 프로필 사진
+- 버킷: `profile_img`
 - DB 저장값: `profiles.avatar_path`
 
 ### 2) 공지 첨부 파일
 - 버킷: `notice-files`
-- 용도: 공지사항 첨부 파일
-- DB 저장값: `notices.file_path`를 기준값으로 사용
-- `notices.file_url`은 공개 링크 캐시 또는 하위 호환 용도로 유지 가능
+- DB 저장값: `notices.file_path`
 
-## 권한 기준
-
-기본 역할:
-
-- `member`
-- `admin`
-- `super_admin`
-
-권한 원칙:
-
+## 권한 기준 요약
 - 조회: 로그인 사용자 허용
-- 생성/수정/삭제: `admin`, `super_admin`만 허용
-- 권한 관리: 추후 `super_admin` 전용으로 확장
-- 회원 상태 `inactive` 사용자는 로그인/사용 흐름에서 차단
-- 회원 `department`/`status` 수정은 관리자 메뉴 `회원 관리`에서만 수행
-
-중요:
-
-- 클라이언트 UI 숨김만으로 권한을 처리하지 않습니다.
-- RLS 또는 서버 로직으로 실제 쓰기 권한을 차단해야 합니다.
-
-## 기존 마이그레이션 대비 변경 방향
-
-현재 `supabase/migrations` 기준에서 아래 항목은 재설계가 필요합니다.
-
-### 유지 가능한 항목
-- `profiles`
-- `push_tokens`
-- `notices`
-
-### 구조 변경이 필요한 항목
-- `teams`
-- `matches`
-- `league_table`
-
-이유:
-
-- 현재 구조는 시즌 개념이 없습니다.
-- 현재 쓰기 정책은 `created_by = auth.uid()` 기반이라 관리자 운영 구조와 맞지 않습니다.
-- `league_table`은 시즌별 집계가 가능하도록 다시 설계해야 합니다.
-
-### 재검토 항목
-- `team_members`
-- `home_players`
-- `away_players`
-
-현재 메뉴 기획 기준에서는 우선순위가 낮습니다.
-초기 버전에서는 제외하거나 후순위로 두는 것이 적절합니다.
+- 경기/시즌/팀/공지 쓰기: `admin`, `super_admin`
+- 개인 일정(`leave`, `business_trip`, `personal`) 쓰기: 본인 + 관리자
+- 공휴일(`holiday`) 쓰기: 관리자
 
 ## 최종 요약
-
-최종 기준은 아래와 같습니다.
-
-1. 사용자 원본 계정은 `auth.users`를 사용합니다.
-2. 앱 프로필은 `profiles`에서 관리합니다.
-3. 프로필 이미지는 Supabase Storage에 저장하고, `profiles.avatar_path`에 경로를 저장합니다.
-4. 공지사항은 시즌과 무관한 전역 데이터입니다.
-5. 시즌, 팀 등록, 경기 스케줄, 경기 푸쉬 발송은 모두 시즌 기준으로 관리합니다.
-6. 관리자 권한은 `profiles.role`로 판별합니다.
-7. 회원 활성 상태는 `profiles.status`로 판별하고 `inactive` 사용자는 차단합니다.
-8. 회원 부서는 `profiles.department`(`1부~4부`)로 관리합니다.
-9. 실제 DB 쓰기 권한은 관리자만 허용하도록 RLS를 설계합니다.
+1. 경기 원본은 `matches`, 통합 조회는 `calendar_events`로 분리합니다.
+2. 캘린더 시간 정책은 `is_all_day + start_at/end_at`로 통일합니다.
+3. 공휴일/경기/개인일정을 한 월간 캘린더에서 함께 노출합니다.

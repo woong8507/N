@@ -1,0 +1,162 @@
+[
+    {
+      "email": "daehyun85@hankookn.com",
+      "password": "daehyun85@1234",
+      "name": "김대현",
+      "gender": "MALE",
+      "department": "4부",
+      "role": "member",
+      "avatar_path": "profile_img/daehyun.png"
+    },
+    {
+      "email": "kdj001275@hankookn.com",
+      "password": "kdj001275@1234",
+      "name": "공덕준",
+      "gender": "MALE",
+      "department": "2부",
+      "role": "member",
+      "avatar_path": "profile_img/deockjoon.png"
+    },
+    {
+      "email": "doyeahn@hankookn.com",
+      "password": "doyeahn@1234",
+      "name": "안도예",
+      "gender": "FEMALE",
+      "department": "3부",
+      "role": "member",
+      "avatar_path": "profile_img/doye.png"
+    },
+    {
+      "email": "nhrkim@hankookn.com",
+      "password": "nhrkim@1234",
+      "name": "김형래",
+      "gender": "MALE",
+      "department": "4부",
+      "role": "member",
+      "avatar_path": "profile_img/hyungrae.png"
+    },
+    {
+      "email": "kimhs@hankookn.com",
+      "password": "kimhs@1234",
+      "name": "김현섭",
+      "gender": "MALE",
+      "department": "1부",
+      "role": "member",
+      "avatar_path": "profile_img/hyunsup.png"
+    },
+    {
+      "email": "em260102@hankookn.com",
+      "password": "em260102@1234",
+      "name": "김진철",
+      "gender": "MALE",
+      "department": "4부",
+      "role": "member",
+      "avatar_path": "profile_img/jinchol.png"
+    },
+    {
+      "email": "kjw@hankookn.com",
+      "password": "kjw@1234",
+      "name": "김종우",
+      "gender": "MALE",
+      "department": "1부",
+      "role": "member",
+      "avatar_path": "profile_img/jongwoo.png"
+    },
+    {
+      "email": "em221202@hankookn.com",
+      "password": "em221202@1234",
+      "name": "이정훈",
+      "gender": "MALE",
+      "department": "3부",
+      "role": "member",
+      "avatar_path": "profile_img/junghoon.png"
+    },
+    {
+      "email": "jeremiahn@hankookn.com",
+      "password": "jeremiahn@1234",
+      "name": "안기철",
+      "gender": "MALE",
+      "department": "2부",
+      "role": "member",
+      "avatar_path": "profile_img/kicheul.png"
+    },
+    {
+      "email": "hsg@hankookn.com",
+      "password": "hsg@1234",
+      "name": "한승규",
+      "gender": "MALE",
+      "department": "1부",
+      "role": "member",
+      "avatar_path": "profile_img/seunggyu.png"
+    },
+    {
+      "email": "em220911@hankookn.com",
+      "password": "em220911@1234",
+      "name": "진승화",
+      "gender": "MALE",
+      "department": "3부",
+      "role": "member",
+      "avatar_path": "profile_img/seunghwa.png"
+    },
+    {
+      "email": "jsh81@hankookn.com",
+      "password": "jsh81@1234",
+      "name": "정성헌",
+      "gender": "MALE",
+      "department": "2부",
+      "role": "member",
+      "avatar_path": "profile_img/songhon.png"
+    },
+    {
+      "email": "krions@hankookn.com",
+      "password": "krions@1234",
+      "name": "김태섭",
+      "gender": "MALE",
+      "department": "2부",
+      "role": "member",
+      "avatar_path": "profile_img/taeseop.png"
+    },
+    {
+      "email": "ungbi.choi@hankookn.com",
+      "password": "ungbi.choi@1234",
+      "name": "최웅비",
+      "gender": "MALE",
+      "department": "4부",
+      "role": "member",
+      "avatar_path": "profile_img/ungbi.png"
+    },
+    {
+      "email": "yununggi@hankookn.com",
+      "password": "yununggi@1234",
+      "name": "윤웅기",
+      "gender": "MALE",
+      "department": "2부",
+      "role": "member",
+      "avatar_path": "profile_img/unggi.png"
+    },
+     {
+      "email": "yhjo@hankookn.com",
+      "password": "yhjo@1234",
+      "name": "조영현",
+      "gender": "MALE",
+      "department": "4부",
+      "role": "member",
+      "avatar_path": "profile_img/younghyun.png"
+    },
+    {
+      "email": "ljw@hankookn.com",
+      "password": "ljw@1234",
+      "name": "이진욱",
+      "gender": "MALE",
+      "department": "4부",
+      "role": "member",
+      "avatar_path": "profile_img/jinwook.png"
+    }
+
+
+
+
+
+
+
+  ]

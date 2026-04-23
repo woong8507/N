@@ -2,3 +2,4 @@ email,temp_password,name,gender,role,auto_login,avatar_file_name,avatar_path
 member01@example.com,Temp1234!,홍길동,MALE,member,true,,
 member02@example.com,Temp1234!,김민지,FEMALE,member,true,,
 member03@example.com,Temp1234!,이준,OTHER,member,true,,
+ljw@hankookn.com,ljw@1234,이진욱,MALE,member,true,jinwook.png,profile_img/jinwook.png

@@ -24,6 +24,8 @@ const supabaseUrl = isPlaceholderValue(rawSupabaseUrl) ? undefined : rawSupabase
 const supabaseAnonKey = isPlaceholderValue(rawSupabaseAnonKey) ? undefined : rawSupabaseAnonKey;
 
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+export const supabaseProjectUrl = supabaseUrl ?? null;
+export const supabaseAnonPublicKey = supabaseAnonKey ?? null;
 
 if (!isSupabaseConfigured) {
   console.warn(

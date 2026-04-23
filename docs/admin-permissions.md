@@ -2,172 +2,86 @@
 
 ## 개요
 이 문서는 로그인 이후 메인화면과 관리자 메뉴에서 사용할 권한 기준을 정리합니다.
-인증 자체는 [`auth-flow.md`](/Users/jkw/Documents/Nproject/docs/auth-flow.md)를 따르고, 이 문서는 로그인 이후 어떤 메뉴를 누구에게 노출하고 어떤 작업을 허용할지 정의하는 용도입니다.
+인증 자체는 `docs/auth-flow.md`, 캘린더 상세는 `docs/calendar-event-planning.md`를 기준으로 합니다.
 
 ## 권한 설계 원칙
-1. 권한은 UI 숨김만으로 처리하지 않고, Supabase 정책 또는 서버 로직으로도 반드시 차단합니다.
+1. 권한은 UI 숨김만으로 처리하지 않고, Supabase RLS 또는 서버 로직으로 반드시 차단합니다.
 2. 일반 사용자는 조회 중심, 관리자는 운영/수정 기능 중심으로 구분합니다.
-3. 메뉴 노출 여부와 실제 실행 권한은 분리해서 생각합니다.
-4. 권한 기준값은 `profiles` 테이블에서 관리하는 것을 기본안으로 사용합니다.
+3. 메뉴 노출 여부와 실제 실행 권한은 분리합니다.
+4. 권한 기준값은 `profiles.role`, `profiles.status`를 사용합니다.
 
 ## 기본 역할 구분
 - `member`: 일반 로그인 사용자
 - `admin`: 운영 관리자
 - `super_admin`: 최고 관리자
 
-초기 구현은 `member`와 `admin` 2단계로 시작할 수 있고, 이후 사용자 관리나 권한 위임이 필요해지면 `super_admin`을 추가합니다.
+## 일정/캘린더 권한 기준
+### 공통 조회
+- 로그인 회원은 통합 캘린더(`calendar_events`) 조회 가능
+- 조회 범위에는 공휴일, 경기, 회원 일정이 포함됨
 
-## 권한 기준값
-권한 판별은 `public.profiles`의 권한/회원 상태/부서 컬럼을 기준으로 처리하는 방식을 기본안으로 사용합니다.
+### 개인 일정 (`leave`, `business_trip`, `personal`)
+- `member`: 본인 일정 생성/수정/삭제 가능
+- `admin`, `super_admin`: 전체 개인 일정 관리 가능
 
-예시:
+### 경기 일정 (`match`)
+- 생성/수정/삭제: `admin` 이상
+- 일반 회원은 조회만 가능
 
-```sql
-alter table public.profiles
-add column role text not null default 'member';
+### 공휴일 (`holiday`)
+- 자동 동기화 실행: `admin` 이상
+- 수동 보정/삭제: `admin` 이상
+- 일반 회원은 조회만 가능
 
-alter table public.profiles
-add column status text not null default 'active';
-
-alter table public.profiles
-add column department text;
-```
-
-권장 값:
-- `member`
-- `admin`
-- `super_admin`
-
-회원 상태 값:
-- `active`
-- `inactive`
-
-부서 값:
-- `1부`
-- `2부`
-- `3부`
-- `4부`
-
-가능하면 체크 제약도 함께 둡니다.
-
-```sql
-alter table public.profiles
-add constraint profiles_role_check
-check (role in ('member', 'admin', 'super_admin'));
-
-alter table public.profiles
-add constraint profiles_status_check
-check (status in ('active', 'inactive'));
-
-alter table public.profiles
-add constraint profiles_department_check
-check (
-  department is null
-  or department in ('1부', '2부', '3부', '4부')
-);
-```
-
-## 메뉴별 권한 기준
-
+## 관리자 메뉴 권한 기준
 ### 일반 사용자(`member`)
-- 홈 메인화면 조회 가능
-- 경기 일정 조회 가능
-- 나의 경기 일정 조회 가능
-- 팀 목록 조회 가능
-- 리그 테이블 조회 가능
-- 공지 목록 조회 가능
-- 첨부 파일 열람 가능
+- 홈, 일정, 리그, 팀, 공지 조회 가능
+- 관리자 메뉴 비노출
 
 ### 운영 관리자(`admin`)
 - 일반 사용자 권한 모두 포함
-- 공지 등록 가능
-- 공지 수정/삭제 가능
-- 경기 일정 등록 가능
-- 경기 일정 수정 가능
-- 팀 정보 등록/수정 가능
-- 리그 테이블 수정 가능
-- 메인화면 관리자 전용 메뉴 접근 가능
-- 회원 관리 메뉴 접근 가능
-- 회원 `department` 변경 가능
-- 회원 `active`/`inactive` 상태 변경 가능
+- 공지 등록/수정/삭제
+- 시즌 생성/활성화 전환
+- 팀 관리, 경기 등록/수정
+- 공휴일 동기화 실행 및 보정
+- 회원 `department`/`status` 수정
+- 회원 삭제 버튼 실행 시 `profiles.is_deleted = true` 업데이트(소프트 삭제)
 
 ### 최고 관리자(`super_admin`)
 - 운영 관리자 권한 모두 포함
-- 관리자 권한 부여/회수 가능
-- 사용자 역할 변경 가능
-- 운영 정책성 데이터 초기화 또는 강제 수정 가능
+- 사용자 역할(`role`) 변경
+- 관리자 권한 부여/회수
 
 ## 메뉴 노출 기준
+- `member`: 관리자 메뉴 미노출
+- `admin`, `super_admin`: 홈 상단 톱니 버튼 노출
+- 관리자 페이지 진입은 톱니 버튼 동선으로만 허용
 
-### 일반 사용자 화면
-- 관리자 메뉴 자체를 노출하지 않습니다.
-- 조회 가능한 메뉴만 메인화면과 하단 탭에서 보여줍니다.
+권한 없는 사용자가 직접 경로 진입 시:
+- 즉시 권한 체크
+- `권한이 없습니다` 안내 후 홈으로 이동
 
-### 관리자 화면
-- 홈 상단 헤더에 관리자 전용 톱니 버튼을 노출합니다.
-- 관리자 페이지 진입은 이 톱니 버튼을 기준 동선으로 사용합니다.
-- 예: 톱니 버튼 → `관리자 메뉴`, `공지 등록`, `경기 등록`, `리그 수정`, `회원 관리`
-
-## 숨김과 차단 원칙
-- 일반 사용자는 관리자 메뉴를 기본적으로 보지 않게 합니다.
-- 다만 클라이언트 조작이나 직접 API 호출 가능성을 고려해서, 숨김과 별개로 DB 정책에서도 차단해야 합니다.
-- 즉, "메뉴를 안 보여준다"는 UX 정책이고, "실제로 못 한다"는 보안 정책입니다.
-
-## 권장 화면 동작
-- `member`: 관리자 메뉴 비노출
-- `admin`: 홈 상단 톱니 노출, 톱니를 눌렀을 때 관리자 메뉴 진입 가능
-- `super_admin`: 홈 상단 톱니 노출, 관리자 메뉴 + 권한 관리 메뉴 노출
-
-권한 없는 사용자가 직접 관리자 화면 경로로 진입한 경우:
-- 화면 진입 시 즉시 권한 체크
-- 권한 없으면 `권한이 없습니다` 안내 후 이전 화면 또는 홈으로 이동
-
-## Supabase 적용 권장 사항
-- `profiles.role`, `profiles.status`, `profiles.department` 조회는 로그인 직후 프로필 로딩 시 함께 가져옵니다.
-- `notices`, `matches`, `teams`, `league_table`의 쓰기 권한은 `admin` 이상만 허용하도록 정책을 둡니다.
-- 사용자 역할 수정은 `super_admin` 또는 서버 전용 로직에서만 처리합니다.
-- `profiles.status = 'inactive'` 사용자는 로그인/앱 기능을 차단하는 정책을 둡니다.
-- 회원 `department`와 `status` 수정은 `admin` 이상만 허용합니다.
-
-예시 방향:
-- 조회 정책: `authenticated` 사용자 허용
-- 쓰기 정책: `profiles.role in ('admin', 'super_admin')`
-
-실제 RLS에서는 `auth.uid()` 기준으로 현재 사용자 프로필의 역할을 조회하도록 설계합니다.
-실제 RLS에서는 `auth.uid()` 기준으로 현재 사용자 프로필의 `role`, `status`를 함께 조회하도록 설계합니다.
+## RLS 적용 권장 사항
+- `calendar_events`:
+  - `select`: authenticated 허용
+  - 개인 일정 쓰기: `auth.uid() = created_by` 또는 admin
+  - `match`, `holiday` 쓰기: admin 전용
+- `matches`, `seasons`, `season_teams`, `teams`, `notices` 쓰기: admin 전용
+- `profiles.role` 변경: super_admin 전용
 
 ## 앱 구현 기준
-- 로그인 후 `profiles`에서 `name`, `gender`, `role`, `status`, `department`를 함께 로드합니다.
-- 로그인 성공 후 첫 화면은 항상 홈으로 통일합니다.
-- 홈 메인화면은 `role`에 따라 상단 관리자 톱니 노출 여부를 분기합니다.
-- 관리자 페이지 진입은 홈 상단 톱니 버튼으로만 처리합니다.
-- 공지 업로드 버튼은 `admin` 이상에서만 렌더링합니다.
-- 회원 관리 화면에서 `admin`은 `department`/`status`를 변경하고 `super_admin`은 `role`까지 변경합니다.
-- 추후 경기 등록, 팀 관리, 리그 수정 화면도 동일한 기준을 재사용합니다.
-- `status = inactive` 사용자는 로그인 성공 이후에도 홈 진입 전에 차단 안내 후 로그아웃 처리합니다.
+- 로그인 후 `profiles`에서 `name`, `gender`, `role`, `status`, `department`를 로드
+- `status = inactive`는 홈 진입 전 차단
+- 일정 화면은 `calendar_events` 기준으로 렌더링
+- 경기 등록 화면은 `3F/4F`, 시작/종료 시간, 팀 구성 입력을 필수로 처리
+- 회원 관리 화면은 `is_deleted = true` 회원을 노출하지 않음
 
 ## 우선 적용 권한안
-초기 버전에서는 아래처럼 단순하게 적용합니다.
-
 1. `member`
 2. `admin`
-
-초기 관리자 기능:
-- 공지 업로드
-- 경기 일정 등록/수정
-- 팀 관리
-- 리그 테이블 관리
-
-초기 일반 사용자 기능:
-- 공지 조회
-- 경기 조회
-- 나의 일정 조회
-- 팀 조회
-- 리그 조회
+3. `super_admin` (역할 위임 필요 시 활성화)
 
 ## 추후 확장 포인트
-- 관리자 활동 로그 기록
-- 세부 권한 분리
-- 예: `notice_admin`, `match_admin`, `league_admin`
+- 관리자 활동 로그
+- 세부 권한 분리 (`calendar_admin`, `holiday_admin`)
 - 운영 화면 접근 이력 저장
-- 최고 관리자만 가능한 사용자 권한 관리 화면 추가
