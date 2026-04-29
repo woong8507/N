@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Android: install on SM_S901N",
+      "type": "shell",
+      "command": "npm run android -- --device SM_S901N",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ANDROID_HOME": "/Users/jkw/Library/Android/sdk",
+          "ANDROID_SDK_ROOT": "/Users/jkw/Library/Android/sdk",
+          "PATH": "/Users/jkw/Library/Android/sdk/platform-tools:${env:PATH}"
+        }
+      },
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "Expo: start dev client 8082",
+      "type": "shell",
+      "command": "npm run start -- --dev-client --host lan --port 8082",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ANDROID_HOME": "/Users/jkw/Library/Android/sdk",
+          "ANDROID_SDK_ROOT": "/Users/jkw/Library/Android/sdk",
+          "PATH": "/Users/jkw/Library/Android/sdk/platform-tools:${env:PATH}"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "expo",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Starting project at|Starting Metro Bundler",
+          "endsPattern": "Waiting on http://localhost:8082|Logs for your project will appear below"
+        }
+      },
+      "group": "build"
+    }
+  ]
+}

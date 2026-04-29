@@ -38,6 +38,7 @@ npm install
 - 역할 기반 관리자 화면 접근 제어 (`member`, `admin`, `super_admin`)
 - 회원 관리: 프로필 이미지 표시 + 소프트 삭제(`profiles.is_deleted`)
 - 시즌 기반 팀/경기 관리 (`seasons`, `season_teams`, `matches`)
+- 팀 로고 업로드 및 표시 (`teams.emblem_url`)
 - 공지사항 업로드/조회 (`notices`, `notice-files`)
 - 모바일 푸시 토큰 등록 (`push_tokens`)
 - 통합 캘린더 월간뷰(기획 기준)

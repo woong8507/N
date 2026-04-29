@@ -25,6 +25,7 @@
 7. `matches`
 8. `calendar_events`
 9. `match_push_logs`
+10. `match_attendance`
 
 ## 1. profiles
 주요 컬럼:
@@ -191,6 +192,33 @@
 - `sent_by uuid`
 - `sent_at timestamptz default now()`
 
+## 10. match_attendance
+금일 경기 참석 여부 저장 테이블입니다.
+
+주요 컬럼:
+- `id bigserial primary key`
+- `match_id bigint not null`
+- `user_id uuid not null`
+- `status text not null default 'pending'`
+- `checked_at timestamptz`
+- `created_at timestamptz default now()`
+- `updated_at timestamptz default now()`
+
+권장 제약:
+- `match_attendance_status_check`: `status in ('pending','attend','absent')`
+- `match_attendance_match_user_uidx`: unique `(match_id, user_id)`
+
+권장 인덱스:
+- `match_attendance_match_id_idx` on `(match_id)`
+- `match_attendance_user_id_idx` on `(user_id)`
+- `match_attendance_status_idx` on `(status)`
+
+운영 규칙:
+- 일반 회원은 본인(`auth.uid() = user_id`) 행만 수정 가능
+- 관리자(`admin`, `super_admin`)는 조회/관리 가능
+- 앱 레벨에서 **KST 금일 경기만 상태 변경 허용**
+- 상태가 `attend` 또는 `absent`로 바뀌는 시점에 `checked_at = now()` 기록
+
 ## Storage 구조
 ### 1) 프로필 이미지
 - 버킷: `profile_img`
@@ -200,11 +228,17 @@
 - 버킷: `notice-files`
 - DB 저장값: `notices.file_path`
 
+### 3) 팀 로고
+- 버킷: `team-logos`
+- DB 저장값: `teams.emblem_url`
+- 관리 화면에서 파일 업로드 후 public URL을 저장하는 방식으로 운영합니다.
+
 ## 권한 기준 요약
 - 조회: 로그인 사용자 허용
 - 경기/시즌/팀/공지 쓰기: `admin`, `super_admin`
 - 개인 일정(`leave`, `business_trip`, `personal`) 쓰기: 본인 + 관리자
 - 공휴일(`holiday`) 쓰기: 관리자
+- 경기 참석(`match_attendance`) 쓰기: 본인 + 관리자(앱에서 금일 경기만 허용)
 
 ## 최종 요약
 1. 경기 원본은 `matches`, 통합 조회는 `calendar_events`로 분리합니다.

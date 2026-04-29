@@ -8,10 +8,11 @@ const easProjectId =
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
-  name: 'expo-supabase-starter',
-  slug: 'expo-supabase-starter',
+  name: 'N-clasico',
+  slug: 'n-clasico',
   version: '1.0.0',
   scheme: 'supabaseexpo',
+  icon: './assets/app-icon.png',
   orientation: 'portrait',
   platforms: ['ios', 'android', 'web'],
   extra: {
@@ -38,10 +39,11 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     },
   },
   android: {
+    package: 'com.alimajung2.nclasico',
     permissions: ['NOTIFICATIONS'],
     adaptiveIcon: {
-      foregroundImage: './assets/adaptive-icon.png',
-      backgroundColor: '#ffffff',
+      foregroundImage: './assets/adaptive-foreground.png',
+      backgroundColor: '#040b2c',
     },
   },
   web: {
@@ -52,7 +54,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       'expo-notifications',
       {
         icon: './assets/adaptive-icon.png',
-        color: '#22c55e',
+        color: '#c3ef00',
         sounds: [],
       },
     ],

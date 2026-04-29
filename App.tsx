@@ -1,14 +1,18 @@
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
   Image,
   KeyboardAvoidingView,
   Linking,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Platform,
-  Pressable,
   SafeAreaView,
   StyleSheet,
+  StatusBar as NativeStatusBar,
   Text,
   TextInput,
   TouchableOpacity,
@@ -19,7 +23,7 @@ import {
 import type { DocumentPickerAsset } from 'expo-document-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Session } from '@supabase/supabase-js';
+import { Session, SupabaseClient } from '@supabase/supabase-js';
 import { PushRegistrationStatus, registerForPush } from '@/lib/push';
 import { isSupabaseConfigured, supabase, supabaseAnonPublicKey, supabaseProjectUrl } from '@/lib/supabase';
 
@@ -47,6 +51,12 @@ type MatchStatus = 'scheduled' | 'live' | 'finished' | 'cancelled';
 
 const NOTICE_BUCKET = 'notice-files';
 const PROFILE_IMAGE_BUCKET = 'profile_img';
+const TEAM_LOGO_BUCKET = 'team-logos';
+const FALLBACK_TEAM_LOGO = require('./assets/adaptive-icon.png');
+const ANDROID_STATUS_BAR_GAP = Platform.OS === 'android' ? NativeStatusBar.currentHeight ?? 24 : 0;
+const ANDROID_NAV_BAR_GAP = Platform.OS === 'android' ? 30 : 0;
+const AUTO_LOGIN_STARTED_AT_KEY = 'nclasico:auto-login-started-at';
+const AUTO_LOGIN_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 type MatchSchedule = {
   id: number;
@@ -57,6 +67,8 @@ type MatchSchedule = {
   awaySeasonTeamId: number | null;
   homeTeam: string;
   awayTeam: string;
+  homeTeamLogoUrl: string | null;
+  awayTeamLogoUrl: string | null;
   homePlayers: string;
   awayPlayers: string;
   homeScore: number | null;
@@ -70,6 +82,8 @@ type Team = {
   id: number | string;
   name: string;
   memberCount: number;
+  memberNames: string[];
+  emblemUrl: string | null;
 };
 
 type Season = {
@@ -128,6 +142,8 @@ type MemberDirectoryItem = {
   avatarPath: string | null;
   avatarUrl: string | null;
 };
+
+type MatchAttendanceStatus = 'pending' | 'attend' | 'absent';
 
 type ManagedMemberWithoutStatus = Omit<ManagedMember, 'status'>;
 type ManagedMemberWithoutDeleted = Omit<ManagedMember, 'is_deleted'>;
@@ -192,13 +208,16 @@ type MatchQueryRow = {
 type TeamQueryRow = {
   id: number;
   team_id: number;
+  display_order?: number | null;
   team: {
     id: number;
     name: string;
+    emblem_url?: string | null;
     team_members: Array<{ user_id: string }> | null;
   } | Array<{
     id: number;
     name: string;
+    emblem_url?: string | null;
     team_members: Array<{ user_id: string }> | null;
   }> | null;
 };
@@ -222,6 +241,8 @@ type TeamDraftRow = {
   playerOneId: string | null;
   playerTwoId: string | null;
   teamName: string;
+  emblemUrl: string | null;
+  logoAsset: DocumentPickerAsset | null;
 };
 
 type MatchForm = {
@@ -249,6 +270,16 @@ type LeagueQueryRow = {
   ga: number;
   gd: number;
   played: number;
+};
+
+type LeagueSeasonTeamRow = {
+  id: number;
+  display_order: number | null;
+  team: {
+    name: string;
+  } | Array<{
+    name: string;
+  }> | null;
 };
 
 type TeamRecentResult = '승' | '무' | '패';
@@ -310,6 +341,8 @@ const createEmptyTeamDraftRow = (): TeamDraftRow => ({
   playerOneId: null,
   playerTwoId: null,
   teamName: '',
+  emblemUrl: null,
+  logoAsset: null,
 });
 
 const createEmptyMatchEntry = (): MatchEntry => ({
@@ -320,11 +353,26 @@ const createEmptyMatchEntry = (): MatchEntry => ({
 
 const getTeamRelation = (
   team: TeamQueryRow['team']
-): { id: number; name: string; team_members: Array<{ user_id: string }> | null } | null => {
+): { id: number; name: string; emblem_url?: string | null; team_members: Array<{ user_id: string }> | null } | null => {
   if (!team) {
     return null;
   }
   return Array.isArray(team) ? (team[0] ?? null) : team;
+};
+
+const getTeamMemberNames = (
+  teamMembers: Array<{ user_id: string }> | null | undefined,
+  memberDirectory: MemberDirectoryItem[]
+) => {
+  const memberNameById = memberDirectory.reduce<Record<string, string>>((acc, member) => {
+    acc[member.id] = member.name;
+    return acc;
+  }, {});
+
+  return (teamMembers ?? []).flatMap((member) => {
+    const memberName = memberNameById[member.user_id];
+    return memberName ? [memberName] : [];
+  });
 };
 
 const emptyMatchForm: MatchForm = {
@@ -358,6 +406,9 @@ const matchStatusLabel: Record<MatchStatus, string> = {
   cancelled: '취소',
 };
 
+const WEEKLY_STATUS_PAGE_RADIUS = 8;
+const INITIAL_WEEKLY_STATUS_PAGE_INDEX = WEEKLY_STATUS_PAGE_RADIUS;
+
 const previewProfile: Profile = {
   id: 'preview-user',
   name: '홍길동',
@@ -378,6 +429,8 @@ const previewSchedules: MatchSchedule[] = [
     awaySeasonTeamId: 2,
     homeTeam: '마인츠',
     awayTeam: '스트라스부르',
+    homeTeamLogoUrl: null,
+    awayTeamLogoUrl: null,
     homePlayers: '손흥민, 이강인',
     awayPlayers: '김민재, 황희찬',
     homeScore: null,
@@ -395,6 +448,8 @@ const previewSchedules: MatchSchedule[] = [
     awaySeasonTeamId: 3,
     homeTeam: '서울FC',
     awayTeam: '수원블루',
+    homeTeamLogoUrl: null,
+    awayTeamLogoUrl: null,
     homePlayers: '김준호, 박민수',
     awayPlayers: '이현우, 정승민',
     homeScore: 2,
@@ -412,6 +467,8 @@ const previewSchedules: MatchSchedule[] = [
     awaySeasonTeamId: 3,
     homeTeam: '아스날',
     awayTeam: '첼시',
+    homeTeamLogoUrl: null,
+    awayTeamLogoUrl: null,
     homePlayers: 'Player A, Player B',
     awayPlayers: 'Player C, Player D',
     homeScore: null,
@@ -423,9 +480,9 @@ const previewSchedules: MatchSchedule[] = [
 ];
 
 const previewTeams: Team[] = [
-  { id: 1, name: '레드스타', memberCount: 14 },
-  { id: 2, name: '블루웨이브', memberCount: 12 },
-  { id: 3, name: '그린유나이티드', memberCount: 15 },
+  { id: 1, name: '레드스타', memberCount: 2, memberNames: ['손흥민', '이강인'], emblemUrl: null },
+  { id: 2, name: '블루웨이브', memberCount: 2, memberNames: ['김민재', '황희찬'], emblemUrl: null },
+  { id: 3, name: '그린유나이티드', memberCount: 2, memberNames: ['김준호', '박민수'], emblemUrl: null },
 ];
 
 const previewLeagueTable: LeagueRow[] = [
@@ -470,7 +527,11 @@ const toMatchStatus = (value: string | null | undefined): MatchStatus => {
   return isMatchStatus(value) ? value : 'scheduled';
 };
 
-const mapMatchRow = (row: MatchQueryRow, teamNamesBySeasonTeamId: Record<number, string>): MatchSchedule => ({
+const mapMatchRow = (
+  row: MatchQueryRow,
+  teamNamesBySeasonTeamId: Record<number, string>,
+  teamLogoUrlsBySeasonTeamId: Record<number, string | null> = {}
+): MatchSchedule => ({
   id: row.id,
   date: row.match_date,
   weekday: row.weekday,
@@ -479,6 +540,8 @@ const mapMatchRow = (row: MatchQueryRow, teamNamesBySeasonTeamId: Record<number,
   awaySeasonTeamId: row.away_season_team_id,
   homeTeam: row.home_season_team_id ? teamNamesBySeasonTeamId[row.home_season_team_id] ?? 'TBD' : 'TBD',
   awayTeam: row.away_season_team_id ? teamNamesBySeasonTeamId[row.away_season_team_id] ?? 'TBD' : 'TBD',
+  homeTeamLogoUrl: row.home_season_team_id ? teamLogoUrlsBySeasonTeamId[row.home_season_team_id] ?? null : null,
+  awayTeamLogoUrl: row.away_season_team_id ? teamLogoUrlsBySeasonTeamId[row.away_season_team_id] ?? null : null,
   homePlayers: row.home_players ?? '-',
   awayPlayers: row.away_players ?? '-',
   homeRating: row.home_rating,
@@ -544,6 +607,52 @@ const buildRecentResultsByTeam = (matches: MatchSchedule[]) => {
   }
 
   return recentByTeam;
+};
+
+const normalizeLeagueTeamKey = (teamName: string) => teamName.trim();
+
+const buildEmptyLeagueRow = (rank: number, team: string): LeagueRow => ({
+  rank,
+  team,
+  wins: 0,
+  draws: 0,
+  losses: 0,
+  points: 0,
+  gf: 0,
+  ga: 0,
+  gd: 0,
+  played: 0,
+});
+
+const mergeLeagueRowsWithSeasonTeams = (
+  leagueRows: LeagueRow[],
+  seasonTeams: Array<{ name: string; displayOrder: number | null }>
+) => {
+  const existingTeamKeys = new Set(
+    leagueRows.map((row) => normalizeLeagueTeamKey(row.team)).filter(Boolean)
+  );
+  const nextRows = [...leagueRows];
+
+  seasonTeams
+    .filter((team) => {
+      const teamKey = normalizeLeagueTeamKey(team.name);
+      return teamKey && !existingTeamKeys.has(teamKey);
+    })
+    .sort((a, b) => {
+      const aOrder = a.displayOrder ?? Number.MAX_SAFE_INTEGER;
+      const bOrder = b.displayOrder ?? Number.MAX_SAFE_INTEGER;
+      if (aOrder !== bOrder) {
+        return aOrder - bOrder;
+      }
+      return a.name.localeCompare(b.name, 'ko');
+    })
+    .forEach((team) => {
+      const teamKey = normalizeLeagueTeamKey(team.name);
+      existingTeamKeys.add(teamKey);
+      nextRows.push(buildEmptyLeagueRow(nextRows.length + 1, team.name));
+    });
+
+  return nextRows;
 };
 
 const parseMatchPlayerNames = (value: string) => {
@@ -663,6 +772,17 @@ const toKstTimeLabelFromIso = (value: string) => {
   return `${hour}:${minute}`;
 };
 
+const toMatchDateDisplayLabel = (match: MatchSchedule) => {
+  const dateInput = toKstDateInputFromIso(match.date);
+  if (!dateInput) {
+    return '경기일 미정';
+  }
+
+  const [, monthText, dayText] = dateInput.split('-');
+  const weekdayLabel = match.weekday ? `(${match.weekday})` : '';
+  return `${Number(monthText)}월 ${Number(dayText)}일${weekdayLabel}`;
+};
+
 const parseDateInput = (value: string) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return null;
@@ -689,6 +809,17 @@ const parseDateInput = (value: string) => {
 const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '-');
 const isAdminAccount = (role: ProfileRole | null | undefined) => role === 'admin' || role === 'super_admin';
 const isSuperAdminAccount = (role: ProfileRole | null | undefined) => role === 'super_admin';
+const readAutoLoginStartedAt = async () => {
+  const storedValue = await AsyncStorage.getItem(AUTO_LOGIN_STARTED_AT_KEY);
+  const startedAt = storedValue ? Number(storedValue) : NaN;
+  return Number.isFinite(startedAt) ? startedAt : null;
+};
+const saveAutoLoginStartedAt = () => AsyncStorage.setItem(AUTO_LOGIN_STARTED_AT_KEY, `${Date.now()}`);
+const clearAutoLoginStartedAt = () => AsyncStorage.removeItem(AUTO_LOGIN_STARTED_AT_KEY);
+const signOutAndClearAutoLogin = async (client: SupabaseClient) => {
+  await clearAutoLoginStartedAt();
+  await client.auth.signOut();
+};
 const makeSeasonSlug = (name: string) =>
   `${name
     .trim()
@@ -705,6 +836,22 @@ const toWeekdayKoFromDateInput = (dateInput: string) => {
     return '';
   }
   return weekdayKo[date.getDay()];
+};
+
+const getWeekStartDate = (date: Date) => {
+  const weekStart = new Date(date);
+  const day = weekStart.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  weekStart.setDate(weekStart.getDate() + diffToMonday);
+  return weekStart;
+};
+
+const getWeekOfMonthLabel = (date: Date) => {
+  const monthStart = new Date(date.getFullYear(), date.getMonth(), 1);
+  const monthStartDay = monthStart.getDay();
+  const monthLeadingOffset = monthStartDay === 0 ? 6 : monthStartDay - 1;
+  const weekOfMonth = Math.floor((date.getDate() + monthLeadingOffset - 1) / 7) + 1;
+  return `${date.getMonth() + 1}월${weekOfMonth}주차`;
 };
 
 const defaultPushState: PushSetupState = {
@@ -799,6 +946,24 @@ const getNoticeFileUrl = (notice: Notice) => {
   }
 
   return notice.file_url;
+};
+
+const resolveStoragePublicUrl = (bucket: string, value: string | null | undefined) => {
+  if (!value) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    return value;
+  }
+
+  const normalizedPath = value.trim().replace(/^\/+/, '');
+  if (!normalizedPath || !supabase) {
+    return null;
+  }
+
+  const { data } = supabase.storage.from(bucket).getPublicUrl(normalizedPath);
+  return data.publicUrl || null;
 };
 
 const resolveProfileAvatarUrl = async (avatarPath: string | null) => {
@@ -957,6 +1122,8 @@ export default function App() {
   const [leagueStandingsRows, setLeagueStandingsRows] = useState<LeagueRow[]>([]);
   const [leagueRecentByTeam, setLeagueRecentByTeam] = useState<Record<string, TeamRecentResult[]>>({});
   const [leagueTeamAvatarByName, setLeagueTeamAvatarByName] = useState<Record<string, Array<string | null>>>({});
+  const [leagueTeamMemberNamesByName, setLeagueTeamMemberNamesByName] = useState<Record<string, string[]>>({});
+  const [leagueTeamLogoByName, setLeagueTeamLogoByName] = useState<Record<string, string | null>>({});
   const [isLoadingLeagueStandings, setIsLoadingLeagueStandings] = useState(false);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [seasonForm, setSeasonForm] = useState<SeasonForm>(emptySeasonForm);
@@ -986,6 +1153,8 @@ export default function App() {
   const [selectedSeasonMatchCount, setSelectedSeasonMatchCount] = useState(0);
   const [matchSeasonTeams, setMatchSeasonTeams] = useState<MatchSeasonTeamItem[]>([]);
   const [matchForm, setMatchForm] = useState<MatchForm>(emptyMatchForm);
+  const [matchAttendanceByMatchId, setMatchAttendanceByMatchId] = useState<Record<number, Record<string, MatchAttendanceStatus>>>({});
+  const [savingAttendanceMatchId, setSavingAttendanceMatchId] = useState<number | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
@@ -1013,19 +1182,161 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!supabase) return;
+    if (!session) {
+      setMatchAttendanceByMatchId({});
+      return;
+    }
+    if (!supabase) {
+      return;
+    }
 
-    supabase.auth.getSession().then(({ data }) => {
-      setIsHomePreview(false);
-      setSession(data.session);
-      setScreen(data.session ? 'home' : 'auth');
+    const todayDateInput = toDateInput(new Date());
+    const todayMatchIds = schedules
+      .filter((match) => toKstDateInputFromIso(match.date) === todayDateInput)
+      .map((match) => match.id);
+
+    if (todayMatchIds.length === 0) {
+      setMatchAttendanceByMatchId({});
+      return;
+    }
+
+    let isActive = true;
+    supabase
+      .from('match_attendance')
+      .select('match_id, user_id, status')
+      .in('match_id', todayMatchIds)
+      .then(({ data, error }) => {
+        if (!isActive) {
+          return;
+        }
+        if (error) {
+          showMessage('경기 참석 상태 불러오기 실패', error.message);
+          return;
+        }
+
+        const nextByMatchId: Record<number, Record<string, MatchAttendanceStatus>> = {};
+        for (const row of (data as Array<{ match_id: number; user_id: string; status: MatchAttendanceStatus }> | null) ?? []) {
+          const byUser = nextByMatchId[row.match_id] ?? {};
+          byUser[row.user_id] = row.status;
+          nextByMatchId[row.match_id] = byUser;
+        }
+        setMatchAttendanceByMatchId(nextByMatchId);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [schedules, session, supabase]);
+
+  const toggleTodayMatchAttendance = async (match: MatchSchedule) => {
+    if (!supabase || !session || !profile) {
+      return;
+    }
+
+    const todayDateInput = toDateInput(new Date());
+    if (toKstDateInputFromIso(match.date) !== todayDateInput) {
+      showMessage('변경 불가', '금일 경기만 참석 상태를 변경할 수 있습니다.');
+      return;
+    }
+
+    const matchPlayerNames = new Set([
+      ...parseMatchPlayerNames(match.homePlayers),
+      ...parseMatchPlayerNames(match.awayPlayers),
+    ]);
+    if (!matchPlayerNames.has(profile.name)) {
+      showMessage('변경 불가', '본인 선수 카드에서만 참석 상태를 변경할 수 있습니다.');
+      return;
+    }
+
+    const currentStatus = matchAttendanceByMatchId[match.id]?.[session.user.id] ?? 'pending';
+    const nextStatus: MatchAttendanceStatus = currentStatus === 'pending'
+      ? 'attend'
+      : currentStatus === 'attend'
+        ? 'absent'
+        : 'pending';
+
+    setSavingAttendanceMatchId(match.id);
+    const checkedAt = nextStatus === 'pending' ? null : new Date().toISOString();
+    const { error } = await supabase
+      .from('match_attendance')
+      .upsert({
+        match_id: match.id,
+        user_id: session.user.id,
+        status: nextStatus,
+        checked_at: checkedAt,
+        updated_at: new Date().toISOString(),
+      }, {
+        onConflict: 'match_id,user_id',
+      });
+
+    if (error) {
+      showMessage('참석 상태 저장 실패', error.message);
+      setSavingAttendanceMatchId(null);
+      return;
+    }
+
+    setMatchAttendanceByMatchId((prev) => {
+      const prevMatchBucket = prev[match.id] ?? {};
+      return {
+        ...prev,
+        [match.id]: {
+          ...prevMatchBucket,
+          [session.user.id]: nextStatus,
+        },
+      };
     });
-    const { data: authListener } = supabase.auth.onAuthStateChange((_, authSession) => {
+    setSavingAttendanceMatchId(null);
+  };
+
+  useEffect(() => {
+    if (!supabase) return;
+    const client = supabase;
+
+    let isActive = true;
+
+    const applyAuthSession = async (authSession: Session | null) => {
+      if (!authSession) {
+        await clearAutoLoginStartedAt();
+        if (!isActive) return;
+        setIsHomePreview(false);
+        setSession(null);
+        setScreen('auth');
+        return;
+      }
+
+      const startedAt = await readAutoLoginStartedAt();
+      if (startedAt === null) {
+        await saveAutoLoginStartedAt();
+      } else if (Date.now() - startedAt > AUTO_LOGIN_DURATION_MS) {
+        await signOutAndClearAutoLogin(client);
+        if (!isActive) return;
+        setIsHomePreview(false);
+        setSession(null);
+        setScreen('auth');
+        showMessage('자동 로그인 만료', '마지막 로그인 후 30일이 지나 다시 로그인해야 합니다.');
+        return;
+      }
+
+      if (!isActive) return;
       setIsHomePreview(false);
       setSession(authSession);
-      setScreen(authSession ? 'home' : 'auth');
+      setScreen('home');
+    };
+
+    supabase.auth.getSession().then(({ data }) => {
+      applyAuthSession(data.session).catch((error: unknown) => {
+        console.warn('Failed to restore auth session', error);
+      });
     });
-    return () => authListener.subscription.unsubscribe();
+    const { data: authListener } = supabase.auth.onAuthStateChange((_, authSession) => {
+      applyAuthSession(authSession).catch((error: unknown) => {
+        console.warn('Failed to apply auth session', error);
+      });
+    });
+    return () => {
+      isActive = false;
+      authListener.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -1044,6 +1355,8 @@ export default function App() {
       setLeagueStandingsRows([]);
       setLeagueRecentByTeam({});
       setLeagueTeamAvatarByName({});
+      setLeagueTeamMemberNamesByName({});
+      setLeagueTeamLogoByName({});
       setIsLoadingLeagueStandings(false);
       setNotices([]);
       setPushState(defaultPushState);
@@ -1236,7 +1549,7 @@ export default function App() {
         if (nextProfile?.status === 'inactive') {
           setIsLoadingData(false);
           showMessage('로그인 차단', '비활성화된 계정입니다. 관리자에게 문의하세요.');
-          await client.auth.signOut();
+          await signOutAndClearAutoLogin(client);
           return;
         }
 
@@ -1263,10 +1576,12 @@ export default function App() {
         setCalendarEvents((calendarEventsResult.data as CalendarEvent[] | null) ?? []);
       }
 
+      let loadedMemberDirectory: MemberDirectoryItem[] = [];
+
       if (memberDirectoryResult.error) {
         setMemberDirectory([]);
       } else {
-        const nextMemberDirectory = await Promise.all(
+        loadedMemberDirectory = await Promise.all(
           memberDirectoryResult.rows.map(async (member) => {
             const avatarPath = member.avatar_path ?? null;
             const avatarUrl = await resolveProfileAvatarUrl(avatarPath);
@@ -1278,7 +1593,7 @@ export default function App() {
             };
           })
         );
-        setMemberDirectory(nextMemberDirectory);
+        setMemberDirectory(loadedMemberDirectory);
       }
 
       const nextSeason = ((seasonsResult.data as Season[] | null) ?? []).find((season) => season.status === 'active') ?? null;
@@ -1298,7 +1613,7 @@ export default function App() {
       ] = await Promise.all([
         client
           .from('season_teams')
-          .select('id, team_id, team:teams(id, name, team_members(user_id))')
+          .select('id, team_id, display_order, team:teams(id, name, emblem_url, team_members(user_id))')
           .eq('season_id', nextSeason.id)
           .order('display_order', { ascending: true }),
         client
@@ -1317,13 +1632,24 @@ export default function App() {
 
       if (seasonTeamsResult.error) {
         showMessage('시즌 팀 불러오기 실패', seasonTeamsResult.error.message);
+        if (leagueResult.error) {
+          showMessage('리그 테이블 불러오기 실패', leagueResult.error.message);
+        } else {
+          setLeagueTable((leagueResult.data as LeagueQueryRow[] | null) ?? []);
+        }
       } else {
         const seasonTeams = (seasonTeamsResult.data as TeamQueryRow[] | null) ?? [];
-        const nextTeams = seasonTeams.map((seasonTeam) => ({
-          id: seasonTeam.id,
-          name: getTeamRelation(seasonTeam.team)?.name ?? '이름 없음',
-          memberCount: getTeamRelation(seasonTeam.team)?.team_members?.length ?? 0,
-        }));
+        const nextTeams = seasonTeams.map((seasonTeam) => {
+          const teamRelation = getTeamRelation(seasonTeam.team);
+          const memberNames = getTeamMemberNames(teamRelation?.team_members, loadedMemberDirectory);
+          return {
+            id: seasonTeam.id,
+            name: teamRelation?.name ?? '이름 없음',
+            memberCount: teamRelation?.team_members?.length ?? 0,
+            memberNames,
+            emblemUrl: teamRelation?.emblem_url ?? null,
+          };
+        });
         const nextMemberTeamIds = seasonTeams
           .filter((seasonTeam) =>
             getTeamRelation(seasonTeam.team)?.team_members?.some((member) => member.user_id === session.user.id)
@@ -1336,20 +1662,31 @@ export default function App() {
           acc[seasonTeam.id] = getTeamRelation(seasonTeam.team)?.name ?? 'TBD';
           return acc;
         }, {});
+        const teamLogoUrlsBySeasonTeamId = seasonTeams.reduce<Record<number, string | null>>((acc, seasonTeam) => {
+          acc[seasonTeam.id] = getTeamRelation(seasonTeam.team)?.emblem_url ?? null;
+          return acc;
+        }, {});
 
         if (matchesResult.error) {
           showMessage('경기 일정 불러오기 실패', matchesResult.error.message);
         } else {
           setSchedules(
-            ((matchesResult.data as MatchQueryRow[] | null) ?? []).map((row) => mapMatchRow(row, teamNamesBySeasonTeamId))
+            ((matchesResult.data as MatchQueryRow[] | null) ?? []).map((row) => mapMatchRow(row, teamNamesBySeasonTeamId, teamLogoUrlsBySeasonTeamId))
           );
         }
-      }
 
-      if (leagueResult.error) {
-        showMessage('리그 테이블 불러오기 실패', leagueResult.error.message);
-      } else {
-        setLeagueTable((leagueResult.data as LeagueQueryRow[] | null) ?? []);
+        if (leagueResult.error) {
+          showMessage('리그 테이블 불러오기 실패', leagueResult.error.message);
+        } else {
+          const seasonTeamNames = seasonTeams.map((seasonTeam) => ({
+            name: getTeamRelation(seasonTeam.team)?.name ?? '',
+            displayOrder: seasonTeam.display_order ?? null,
+          }));
+          setLeagueTable(mergeLeagueRowsWithSeasonTeams(
+            (leagueResult.data as LeagueQueryRow[] | null) ?? [],
+            seasonTeamNames
+          ));
+        }
       }
 
       setIsLoadingData(false);
@@ -1417,7 +1754,7 @@ export default function App() {
   const refreshActiveSeasonTeams = async (client: NonNullable<typeof supabase>, currentActiveSeasonId: number, userId: string) => {
     const seasonTeamsResult = await client
       .from('season_teams')
-      .select('id, team_id, team:teams(id, name, team_members(user_id))')
+      .select('id, team_id, display_order, team:teams(id, name, emblem_url, team_members(user_id))')
       .eq('season_id', currentActiveSeasonId)
       .order('display_order', { ascending: true });
 
@@ -1426,11 +1763,17 @@ export default function App() {
     }
 
     const seasonTeams = (seasonTeamsResult.data as TeamQueryRow[] | null) ?? [];
-    const nextTeams = seasonTeams.map((seasonTeam) => ({
-      id: seasonTeam.id,
-      name: getTeamRelation(seasonTeam.team)?.name ?? '이름 없음',
-      memberCount: getTeamRelation(seasonTeam.team)?.team_members?.length ?? 0,
-    }));
+    const nextTeams = seasonTeams.map((seasonTeam) => {
+      const teamRelation = getTeamRelation(seasonTeam.team);
+      const memberNames = getTeamMemberNames(teamRelation?.team_members, memberDirectory);
+      return {
+        id: seasonTeam.id,
+        name: teamRelation?.name ?? '이름 없음',
+        memberCount: teamRelation?.team_members?.length ?? 0,
+        memberNames,
+        emblemUrl: teamRelation?.emblem_url ?? null,
+      };
+    });
     const nextMemberTeamIds = seasonTeams
       .filter((seasonTeam) =>
         getTeamRelation(seasonTeam.team)?.team_members?.some((member) => member.user_id === userId)
@@ -1444,17 +1787,27 @@ export default function App() {
   const fetchSeasonSchedules = async (client: NonNullable<typeof supabase>, seasonId: number) => {
     const seasonTeamsResult = await client
       .from('season_teams')
-      .select('id, team:teams(name)')
+      .select('id, team:teams(name, emblem_url)')
       .eq('season_id', seasonId);
 
     if (seasonTeamsResult.error) {
       throw seasonTeamsResult.error;
     }
 
-    const teamNamesBySeasonTeamId = ((seasonTeamsResult.data as Array<{ id: number; team: Array<{ name: string }> | null }> | null) ?? [])
+    const seasonTeams = (seasonTeamsResult.data as Array<{
+      id: number;
+      team: Array<{ name: string; emblem_url: string | null }> | { name: string; emblem_url: string | null } | null;
+    }> | null) ?? [];
+    const teamNamesBySeasonTeamId = seasonTeams
       .reduce<Record<number, string>>((acc, row) => {
         const rowTeam = Array.isArray(row.team) ? (row.team[0] ?? null) : row.team;
         acc[row.id] = rowTeam?.name ?? 'TBD';
+        return acc;
+      }, {});
+    const teamLogoUrlsBySeasonTeamId = seasonTeams
+      .reduce<Record<number, string | null>>((acc, row) => {
+        const rowTeam = Array.isArray(row.team) ? (row.team[0] ?? null) : row.team;
+        acc[row.id] = rowTeam?.emblem_url ?? null;
         return acc;
       }, {});
 
@@ -1470,21 +1823,41 @@ export default function App() {
       throw matchesResult.error;
     }
 
-    return ((matchesResult.data as MatchQueryRow[] | null) ?? []).map((row) => mapMatchRow(row, teamNamesBySeasonTeamId));
+    return ((matchesResult.data as MatchQueryRow[] | null) ?? []).map((row) => mapMatchRow(row, teamNamesBySeasonTeamId, teamLogoUrlsBySeasonTeamId));
   };
 
   const fetchSeasonLeagueTable = async (client: NonNullable<typeof supabase>, seasonId: number) => {
-    const leagueResult = await client
-      .from('league_table')
-      .select('rank, team, wins, draws, losses, points, gf, ga, gd, played')
-      .eq('season_id', seasonId)
-      .order('rank', { ascending: true });
+    const [leagueResult, seasonTeamsResult] = await Promise.all([
+      client
+        .from('league_table')
+        .select('rank, team, wins, draws, losses, points, gf, ga, gd, played')
+        .eq('season_id', seasonId)
+        .order('rank', { ascending: true }),
+      client
+        .from('season_teams')
+        .select('id, display_order, team:teams(name)')
+        .eq('season_id', seasonId)
+        .order('display_order', { ascending: true }),
+    ]);
 
     if (leagueResult.error) {
       throw leagueResult.error;
     }
+    if (seasonTeamsResult.error) {
+      throw seasonTeamsResult.error;
+    }
 
-    return (leagueResult.data as LeagueQueryRow[] | null) ?? [];
+    const leagueRows = (leagueResult.data as LeagueQueryRow[] | null) ?? [];
+    const seasonTeams = ((seasonTeamsResult.data as LeagueSeasonTeamRow[] | null) ?? [])
+      .map((row) => {
+        const rowTeam = Array.isArray(row.team) ? (row.team[0] ?? null) : row.team;
+        return {
+          name: rowTeam?.name ?? '',
+          displayOrder: row.display_order,
+        };
+      });
+
+    return mergeLeagueRowsWithSeasonTeams(leagueRows, seasonTeams);
   };
 
   const fetchSeasonTeamAvatarByName = async (
@@ -1529,20 +1902,88 @@ export default function App() {
     }, {});
   };
 
+  const fetchSeasonTeamMemberNamesByName = async (
+    client: NonNullable<typeof supabase>,
+    seasonId: number
+  ) => {
+    const seasonTeamsResult = await client
+      .from('season_teams')
+      .select('id, team:teams(name, team_members(user_id))')
+      .eq('season_id', seasonId);
+
+    if (seasonTeamsResult.error) {
+      throw seasonTeamsResult.error;
+    }
+
+    return ((seasonTeamsResult.data as Array<{
+      team: {
+        name: string;
+        team_members: Array<{ user_id: string }> | null;
+      } | Array<{
+        name: string;
+        team_members: Array<{ user_id: string }> | null;
+      }> | null;
+    }> | null) ?? []).reduce<Record<string, string[]>>((acc, row) => {
+      const teamRelation = Array.isArray(row.team) ? (row.team[0] ?? null) : row.team;
+      const teamName = teamRelation?.name;
+      if (!teamName) {
+        return acc;
+      }
+      acc[teamName] = getTeamMemberNames(teamRelation.team_members, memberDirectory);
+      return acc;
+    }, {});
+  };
+
+  const fetchSeasonTeamLogoByName = async (
+    client: NonNullable<typeof supabase>,
+    seasonId: number
+  ) => {
+    const seasonTeamsResult = await client
+      .from('season_teams')
+      .select('id, team:teams(name, emblem_url)')
+      .eq('season_id', seasonId);
+
+    if (seasonTeamsResult.error) {
+      throw seasonTeamsResult.error;
+    }
+
+    return ((seasonTeamsResult.data as Array<{
+      team: {
+        name: string;
+        emblem_url: string | null;
+      } | Array<{
+        name: string;
+        emblem_url: string | null;
+      }> | null;
+    }> | null) ?? []).reduce<Record<string, string | null>>((acc, row) => {
+      const teamRelation = Array.isArray(row.team) ? (row.team[0] ?? null) : row.team;
+      const teamName = teamRelation?.name;
+      if (!teamName) {
+        return acc;
+      }
+      acc[teamName] = teamRelation.emblem_url ?? null;
+      return acc;
+    }, {});
+  };
+
   const refreshLeagueStandingsData = async (
     client: NonNullable<typeof supabase>,
     seasonId: number
   ) => {
     setIsLoadingLeagueStandings(true);
     try {
-      const [leagueRows, seasonMatches, teamAvatarByName] = await Promise.all([
+      const [leagueRows, seasonMatches, teamAvatarByName, teamMemberNamesByName, teamLogoByName] = await Promise.all([
         fetchSeasonLeagueTable(client, seasonId),
         fetchSeasonSchedules(client, seasonId),
         fetchSeasonTeamAvatarByName(client, seasonId),
+        fetchSeasonTeamMemberNamesByName(client, seasonId),
+        fetchSeasonTeamLogoByName(client, seasonId),
       ]);
       setLeagueStandingsRows(leagueRows);
       setLeagueRecentByTeam(buildRecentResultsByTeam(seasonMatches));
       setLeagueTeamAvatarByName(teamAvatarByName);
+      setLeagueTeamMemberNamesByName(teamMemberNamesByName);
+      setLeagueTeamLogoByName(teamLogoByName);
     } finally {
       setIsLoadingLeagueStandings(false);
     }
@@ -1728,13 +2169,14 @@ export default function App() {
 
       const teamIds = seasonTeams.map((seasonTeam) => seasonTeam.team_id);
       const teamNameById: Record<number, string> = {};
+      const teamEmblemUrlById: Record<number, string | null> = {};
       const memberIdsByTeamId: Record<number, string[]> = {};
 
       if (teamIds.length > 0) {
         const [teamsResult, teamMembersResult] = await Promise.all([
           client
             .from('teams')
-            .select('id, name')
+            .select('id, name, emblem_url')
             .in('id', teamIds),
           client
             .from('team_members')
@@ -1749,8 +2191,9 @@ export default function App() {
           throw teamMembersResult.error;
         }
 
-        for (const team of (teamsResult.data as Array<{ id: number; name: string }> | null) ?? []) {
+        for (const team of (teamsResult.data as Array<{ id: number; name: string; emblem_url: string | null }> | null) ?? []) {
           teamNameById[team.id] = team.name;
+          teamEmblemUrlById[team.id] = team.emblem_url ?? null;
         }
 
         for (const member of (teamMembersResult.data as Array<{ team_id: number; user_id: string }> | null) ?? []) {
@@ -1769,6 +2212,8 @@ export default function App() {
           playerOneId: members[0] ?? null,
           playerTwoId: members[1] ?? null,
           teamName: teamNameById[seasonTeam.team_id] ?? '',
+          emblemUrl: teamEmblemUrlById[seasonTeam.team_id] ?? null,
+          logoAsset: null,
         };
       });
 
@@ -1908,13 +2353,17 @@ export default function App() {
     setIsSubmittingAuth(true);
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: emailValue,
         password: passwordValue,
       });
 
       if (error) {
         return showMessage('로그인 실패', formatAuthError(error.message));
+      }
+
+      if (data.session) {
+        await saveAutoLoginStartedAt();
       }
 
       setEmail(emailValue);
@@ -2738,12 +3187,52 @@ export default function App() {
         teamName: row.teamName.trim(),
         playerOneId: row.playerOneId,
         playerTwoId: row.playerTwoId,
+        logoAsset: row.logoAsset,
+        emblemUrl: row.emblemUrl,
       }))
       .filter((row) => row.teamName || row.playerOneId || row.playerTwoId || row.seasonTeamId || row.teamId);
 
     if (effectiveRows.length === 0) {
       return showMessage('입력 필요', '저장할 팀 행이 없습니다.');
     }
+
+    const uploadTeamLogo = async (rowIndex: number, logoAsset: DocumentPickerAsset | null) => {
+      if (!logoAsset) {
+        return null;
+      }
+
+      if (logoAsset.mimeType && !logoAsset.mimeType.startsWith('image/')) {
+        throw new Error(`${rowIndex}팀 행의 로고는 이미지 파일만 업로드할 수 있습니다.`);
+      }
+
+      const fileName = `${session.user.id}/${Date.now()}-${sanitizeFileName(logoAsset.name)}`;
+      let fileBlob: Blob;
+
+      if (logoAsset.file) {
+        fileBlob = logoAsset.file;
+      } else {
+        try {
+          const response = await fetch(logoAsset.uri);
+          fileBlob = await response.blob();
+        } catch (error) {
+          throw new Error(
+            `${rowIndex}팀 로고 파일을 읽을 수 없습니다. 다른 이미지로 다시 시도해 주세요.`
+          );
+        }
+      }
+
+      const uploadResult = await client.storage.from(TEAM_LOGO_BUCKET).upload(fileName, fileBlob, {
+        contentType: logoAsset.mimeType ?? 'application/octet-stream',
+        upsert: false,
+      });
+
+      if (uploadResult.error) {
+        throw new Error(`${uploadResult.error.message} (Storage bucket: ${TEAM_LOGO_BUCKET})`);
+      }
+
+      const { data: publicUrlData } = client.storage.from(TEAM_LOGO_BUCKET).getPublicUrl(fileName);
+      return publicUrlData.publicUrl;
+    };
 
     const invalidRow = effectiveRows.find((row) =>
       !row.teamName
@@ -2880,6 +3369,10 @@ export default function App() {
 
       for (const [index, row] of effectiveRows.entries()) {
         const displayOrder = index + 1;
+        const emblemUrl = row.logoAsset
+          ? await uploadTeamLogo(row.rowIndex, row.logoAsset)
+          : row.emblemUrl ?? null;
+
         if (row.seasonTeamId) {
           const teamId = row.teamId ?? existingSeasonTeamMap[row.seasonTeamId];
           if (!teamId) {
@@ -2888,7 +3381,10 @@ export default function App() {
 
           const teamUpdateResult = await client
             .from('teams')
-            .update({ name: row.teamName })
+            .update({
+              name: row.teamName,
+              emblem_url: emblemUrl,
+            })
             .eq('id', teamId);
 
           if (teamUpdateResult.error) {
@@ -2928,7 +3424,10 @@ export default function App() {
 
         const createTeamResult = await client
           .from('teams')
-          .insert({ name: row.teamName })
+          .insert({
+            name: row.teamName,
+            emblem_url: emblemUrl,
+          })
           .select('id')
           .single();
 
@@ -3174,6 +3673,70 @@ export default function App() {
     : previousScreen === 'admin'
       ? 'admin'
       : 'home';
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (confirmDialog.visible) {
+        setConfirmDialog({ visible: false, title: '', message: '' });
+        return true;
+      }
+
+      if (dialog.visible) {
+        setDialog((prev) => ({ ...prev, visible: false }));
+        return true;
+      }
+
+      if (screen === 'signup') {
+        setScreen('auth');
+        return true;
+      }
+
+      if (screen === 'home' && isHomePreview) {
+        setIsHomePreview(false);
+        setScreen('auth');
+        return true;
+      }
+
+      if (screen === 'auth' || screen === 'home') {
+        return false;
+      }
+
+      if (screen === 'admin') {
+        setScreen('home');
+        return true;
+      }
+
+      if (screen === 'seasonAdmin' || screen === 'memberAdmin') {
+        setScreen('admin');
+        return true;
+      }
+
+      if (screen === 'seasonDetailAdmin') {
+        setScreen('seasonAdmin');
+        return true;
+      }
+
+      if (
+        screen === 'seasonTeamAdmin'
+        || screen === 'seasonMatchAdmin'
+        || screen === 'seasonResultAdmin'
+        || screen === 'seasonStandingAdmin'
+      ) {
+        setScreen('seasonDetailAdmin');
+        return true;
+      }
+
+      setScreen(goBackScreen);
+      return true;
+    });
+
+    return () => subscription.remove();
+  }, [confirmDialog.visible, dialog.visible, goBackScreen, isHomePreview, screen]);
+
   const calendarMonthLabel = new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long' }).format(calendarMonth);
   const visibleCalendarEvents = useMemo(() => {
     return calendarEvents.filter((event) => {
@@ -3188,16 +3751,27 @@ export default function App() {
   }, [activeSeason, calendarEvents]);
 
   const filteredCalendarEvents = useMemo(() => {
+    const myScheduleIdSet = new Set(mySchedules.map((match) => match.id));
+
     return visibleCalendarEvents.filter((event) => {
       if (calendarFilter === 'all') {
         return true;
       }
       if (calendarFilter === 'mine') {
-        return session ? event.created_by === session.user.id : false;
+        if (!session) {
+          return false;
+        }
+        if (event.created_by === session.user.id) {
+          return true;
+        }
+        if (event.event_type === 'match' && event.linked_match_id !== null) {
+          return myScheduleIdSet.has(event.linked_match_id);
+        }
+        return false;
       }
       return event.event_type === calendarFilter;
     });
-  }, [calendarFilter, session, visibleCalendarEvents]);
+  }, [calendarFilter, mySchedules, session, visibleCalendarEvents]);
 
   const selectedDateEvents = useMemo(() => {
     return filteredCalendarEvents
@@ -3304,6 +3878,8 @@ export default function App() {
       setLeagueStandingsRows([]);
       setLeagueRecentByTeam({});
       setLeagueTeamAvatarByName({});
+      setLeagueTeamMemberNamesByName({});
+      setLeagueTeamLogoByName({});
       return;
     }
 
@@ -3327,6 +3903,8 @@ export default function App() {
       setLeagueStandingsRows([]);
       setLeagueRecentByTeam({});
       setLeagueTeamAvatarByName({});
+      setLeagueTeamMemberNamesByName({});
+      setLeagueTeamLogoByName({});
       return;
     }
 
@@ -3356,7 +3934,6 @@ export default function App() {
                 onChangePassword={setPassword}
                 onLogin={login}
                 isSubmitting={isSubmittingAuth}
-                goSignup={() => setScreen('signup')}
                 goPreviewHome={() => {
                   setIsHomePreview(true);
                   setScreen('home');
@@ -3392,6 +3969,8 @@ export default function App() {
               notices={homeNotices}
               leagueTable={homeLeagueTable}
               memberDirectory={homeMemberDirectory}
+              attendanceByMatchId={matchAttendanceByMatchId}
+              savingAttendanceMatchId={savingAttendanceMatchId}
               pushState={pushState}
               lastNotification={lastNotification}
               isRegisteringPush={isRegisteringPush}
@@ -3412,6 +3991,7 @@ export default function App() {
                   setScreen('admin');
                 }
               }}
+              onToggleAttendance={toggleTodayMatchAttendance}
               onSignOut={async () => {
                 if (isHomePreview) {
                   setIsHomePreview(false);
@@ -3419,7 +3999,7 @@ export default function App() {
                   return;
                 }
                 if (!supabase) return;
-                await supabase.auth.signOut();
+                await signOutAndClearAutoLogin(supabase);
                 setScreen('auth');
               }}
             />
@@ -3487,6 +4067,8 @@ export default function App() {
                   data={leagueStandingsRows}
                   recentByTeam={leagueRecentByTeam}
                   avatarByTeamName={leagueTeamAvatarByName}
+                  memberNamesByTeamName={leagueTeamMemberNamesByName}
+                  teamLogoByTeamName={leagueTeamLogoByName}
                   isLoading={isLoadingLeagueStandings}
                   title="팀순위"
                   onSelectSeason={setSelectedLeagueSeasonId}
@@ -3504,12 +4086,13 @@ export default function App() {
                     season={selectedAdminSeason ?? activeSeason}
                     members={members}
                     isLoadingMembers={isLoadingMembers}
-                    initialRows={seasonTeamDraftRows}
-                    isLoadingRows={isLoadingSeasonTeamAdmin}
-                    isSaving={isSavingSeasonTeamAdmin}
-                    onSave={saveSeasonTeams}
-                    goBack={() => setScreen(goBackScreen)}
-                  />
+                  initialRows={seasonTeamDraftRows}
+                  isLoadingRows={isLoadingSeasonTeamAdmin}
+                  isSaving={isSavingSeasonTeamAdmin}
+                  onSave={saveSeasonTeams}
+                  onShowMessage={showMessage}
+                  goBack={() => setScreen(goBackScreen)}
+                />
                 ) : (
                   <TeamsScreen
                     teams={teams}
@@ -3694,6 +4277,7 @@ export default function App() {
                   isLoadingRows={isLoadingSeasonTeamAdmin}
                   isSaving={isSavingSeasonTeamAdmin}
                   onSave={saveSeasonTeams}
+                  onShowMessage={showMessage}
                   goBack={() => setScreen('seasonDetailAdmin')}
                 />
               )}
@@ -3839,6 +4423,8 @@ export default function App() {
                   data={leagueStandingsRows}
                   recentByTeam={leagueRecentByTeam}
                   avatarByTeamName={leagueTeamAvatarByName}
+                  memberNamesByTeamName={leagueTeamMemberNamesByName}
+                  teamLogoByTeamName={leagueTeamLogoByName}
                   isLoading={isLoadingLeagueStandings}
                   title="팀순위"
                   onSelectSeason={setSelectedAdminStandingSeasonId}
@@ -3992,7 +4578,6 @@ function AuthScreen({
   onChangePassword,
   onLogin,
   isSubmitting,
-  goSignup,
   goPreviewHome,
   isSupabaseConfigured,
 }: {
@@ -4002,7 +4587,6 @@ function AuthScreen({
   onChangePassword: (value: string) => void;
   onLogin: () => void;
   isSubmitting: boolean;
-  goSignup: () => void;
   goPreviewHome: () => void;
   isSupabaseConfigured: boolean;
 }) {
@@ -4011,9 +4595,6 @@ function AuthScreen({
   return (
     <View style={styles.authShell}>
       <View style={styles.authHero}>
-        <View style={styles.logoCircle}>
-          <Text style={styles.logoText}>N</Text>
-        </View>
         <Text style={styles.authTitle}>N-CLASICO</Text>
         <Text style={styles.authSubtitle}>FOOTBALL GAME CLUB</Text>
       </View>
@@ -4069,13 +4650,6 @@ function AuthScreen({
           <Text style={styles.previewHomeButtonText}>메인 화면 미리보기</Text>
         </TouchableOpacity>
       )}
-
-      <View style={styles.authFooterRow}>
-        <Text style={styles.footerHint}>New Player?</Text>
-        <TouchableOpacity onPress={goSignup}>
-          <Text style={styles.footerLink}>Sign Up Now</Text>
-        </TouchableOpacity>
-      </View>
     </View>
   );
 }
@@ -4175,6 +4749,8 @@ function HomeScreen({
   notices,
   leagueTable,
   memberDirectory,
+  attendanceByMatchId,
+  savingAttendanceMatchId,
   pushState,
   lastNotification,
   isRegisteringPush,
@@ -4183,6 +4759,7 @@ function HomeScreen({
   onRefreshPush,
   onOpenPushSettings,
   onAdminPress,
+  onToggleAttendance,
   onSignOut,
 }: {
   profile: Profile | null;
@@ -4194,6 +4771,8 @@ function HomeScreen({
   notices: Notice[];
   leagueTable: LeagueRow[];
   memberDirectory: MemberDirectoryItem[];
+  attendanceByMatchId: Record<number, Record<string, MatchAttendanceStatus>>;
+  savingAttendanceMatchId: number | null;
   pushState: PushSetupState;
   lastNotification: NotificationSummary | null;
   isRegisteringPush: boolean;
@@ -4202,9 +4781,53 @@ function HomeScreen({
   onRefreshPush: () => void;
   onOpenPushSettings: () => void;
   onAdminPress: () => void;
+  onToggleAttendance: (match: MatchSchedule) => Promise<void>;
   onSignOut: () => Promise<void>;
 }) {
-  const featuredMatch = schedules[0] ?? null;
+  const featuredMatchPages = useMemo(() => {
+    const todayDateInput = toDateInput(new Date());
+    if (!todayDateInput) {
+      return [];
+    }
+
+    const today = parseDateInput(todayDateInput);
+    const tomorrow = today ? new Date(today) : null;
+    tomorrow?.setDate(tomorrow.getDate() + 1);
+    const tomorrowDateInput = tomorrow ? toDateInput(tomorrow) : '';
+    const sortedMatches = [...schedules].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const previousMatch = [...sortedMatches]
+      .reverse()
+      .find((match) => {
+        const matchDateInput = toKstDateInputFromIso(match.date);
+        return Boolean(matchDateInput && matchDateInput < todayDateInput);
+      }) ?? null;
+    const todayMatch = sortedMatches.find((match) => toKstDateInputFromIso(match.date) === todayDateInput) ?? null;
+    const nextMatch = sortedMatches.find((match) => {
+      const matchDateInput = toKstDateInputFromIso(match.date);
+      return Boolean(matchDateInput && matchDateInput > todayDateInput);
+    }) ?? null;
+
+    return [
+      previousMatch ? { key: 'previous', label: '이전 경기', match: previousMatch } : null,
+      todayMatch ? { key: 'today', label: 'MATCHDAY', match: todayMatch } : null,
+      nextMatch ? {
+        key: 'next',
+        label: toKstDateInputFromIso(nextMatch.date) === tomorrowDateInput ? '내일 경기' : '다음 경기',
+        match: nextMatch,
+      } : null,
+    ].filter((page): page is { key: string; label: string; match: MatchSchedule } => page !== null);
+  }, [schedules]);
+  const todayFeaturedMatchPageIndex = featuredMatchPages.findIndex((page) => page.key === 'today');
+  const nextFeaturedMatchPageIndex = featuredMatchPages.findIndex((page) => page.key === 'next');
+  const initialFeaturedMatchPageIndex = todayFeaturedMatchPageIndex >= 0
+    ? todayFeaturedMatchPageIndex
+    : Math.max(0, nextFeaturedMatchPageIndex);
+  const featuredMatchScrollRef = useRef<ScrollView>(null);
+  const [featuredMatchWidth, setFeaturedMatchWidth] = useState(0);
+  const [selectedFeaturedMatchPage, setSelectedFeaturedMatchPage] = useState(initialFeaturedMatchPageIndex);
+  const weeklyStatusScrollRef = useRef<ScrollView>(null);
+  const [weeklyStatusWidth, setWeeklyStatusWidth] = useState(0);
+  const [selectedWeeklyStatusPage, setSelectedWeeklyStatusPage] = useState(INITIAL_WEEKLY_STATUS_PAGE_INDEX);
   const tabs: Array<{
     key: HomeTab;
     label: string;
@@ -4223,41 +4846,98 @@ function HomeScreen({
       return acc;
     }, {});
   }, [memberDirectory]);
-  const currentWeekMatchSummary = useMemo(() => {
+  const memberIdByName = useMemo(() => {
+    return memberDirectory.reduce<Record<string, string>>((acc, member) => {
+      acc[member.name] = member.id;
+      return acc;
+    }, {});
+  }, [memberDirectory]);
+  const todayDateInput = toDateInput(new Date());
+  const weeklyStatusPages = useMemo(() => {
     const todayDateInput = toDateInput(new Date());
     const today = parseDateInput(todayDateInput);
     if (!today) {
-      return { weekLabel: '이번주', matches: [] as MatchSchedule[] };
+      return [{ key: 'current-week', weekLabel: '이번주', matches: [] as MatchSchedule[] }];
     }
 
-    const day = today.getDay();
-    const diffToMonday = day === 0 ? -6 : 1 - day;
-    const weekStart = new Date(today);
-    weekStart.setDate(today.getDate() + diffToMonday);
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 6);
+    const currentWeekStart = getWeekStartDate(today);
 
-    const weekStartInput = toDateInput(weekStart);
-    const weekEndInput = toDateInput(weekEnd);
+    return Array.from({ length: WEEKLY_STATUS_PAGE_RADIUS * 2 + 1 }, (_, index) => {
+      const offset = index - WEEKLY_STATUS_PAGE_RADIUS;
+      const weekStart = new Date(currentWeekStart);
+      weekStart.setDate(currentWeekStart.getDate() + offset * 7);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6);
 
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthStartDay = monthStart.getDay();
-    const monthLeadingOffset = monthStartDay === 0 ? 6 : monthStartDay - 1;
-    const weekOfMonth = Math.floor((today.getDate() + monthLeadingOffset - 1) / 7) + 1;
-    const weekLabel = `${today.getMonth() + 1}월${weekOfMonth}주차`;
+      const weekStartInput = toDateInput(weekStart);
+      const weekEndInput = toDateInput(weekEnd);
+      const matches = schedules
+        .filter((match) => {
+          const matchDateInput = toKstDateInputFromIso(match.date);
+          if (!matchDateInput) {
+            return false;
+          }
+          return matchDateInput >= weekStartInput && matchDateInput <= weekEndInput;
+        })
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-    const matches = schedules
-      .filter((match) => {
-        const matchDateInput = toKstDateInputFromIso(match.date);
-        if (!matchDateInput) {
-          return false;
-        }
-        return matchDateInput >= weekStartInput && matchDateInput <= weekEndInput;
-      })
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-    return { weekLabel, matches };
+      return {
+        key: `${weekStartInput}-${weekEndInput}`,
+        weekLabel: getWeekOfMonthLabel(weekStart),
+        matches,
+      };
+    });
   }, [schedules]);
+  const selectedWeekMatchSummary = weeklyStatusPages[selectedWeeklyStatusPage] ?? weeklyStatusPages[0];
+
+  useEffect(() => {
+    setSelectedFeaturedMatchPage(initialFeaturedMatchPageIndex);
+  }, [initialFeaturedMatchPageIndex, featuredMatchPages.length]);
+
+  useEffect(() => {
+    if (featuredMatchWidth <= 0 || featuredMatchPages.length === 0) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      featuredMatchScrollRef.current?.scrollTo({
+        x: initialFeaturedMatchPageIndex * featuredMatchWidth,
+        animated: false,
+      });
+    });
+  }, [featuredMatchWidth, featuredMatchPages.length, initialFeaturedMatchPageIndex]);
+
+  useEffect(() => {
+    if (weeklyStatusWidth <= 0) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      weeklyStatusScrollRef.current?.scrollTo({
+        x: weeklyStatusWidth * selectedWeeklyStatusPage,
+        animated: false,
+      });
+    });
+  }, [selectedWeeklyStatusPage, weeklyStatusWidth]);
+
+  const onWeeklyStatusMomentumEnd = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    if (weeklyStatusWidth <= 0) {
+      return;
+    }
+
+    const nextPage = Math.round(event.nativeEvent.contentOffset.x / weeklyStatusWidth);
+    setSelectedWeeklyStatusPage(Math.max(0, Math.min(nextPage, weeklyStatusPages.length - 1)));
+  };
+
+  const onFeaturedMatchMomentumEnd = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    if (featuredMatchWidth <= 0) {
+      return;
+    }
+
+    const nextPage = Math.round(event.nativeEvent.contentOffset.x / featuredMatchWidth);
+    setSelectedFeaturedMatchPage(Math.max(0, Math.min(nextPage, featuredMatchPages.length - 1)));
+  };
+
   const toWeekMatchDateLabel = (value: string) => {
     const dateInput = toKstDateInputFromIso(value);
     if (!dateInput) {
@@ -4272,6 +4952,13 @@ function HomeScreen({
     }
     return '경기전';
   };
+  const getCardStatusForPlayer = (matchId: number, memberId: string | null): MatchAttendanceStatus | null => {
+    if (!memberId) {
+      return null;
+    }
+    return attendanceByMatchId[matchId]?.[memberId] ?? 'pending';
+  };
+  const isTodayMatch = (match: MatchSchedule) => toKstDateInputFromIso(match.date) === todayDateInput;
 
   return (
     <View style={styles.homeShell}>
@@ -4282,7 +4969,6 @@ function HomeScreen({
         <View style={styles.homeHeader}>
           <View>
             <Text style={styles.brandWordmark}>N-CLASICO</Text>
-            <Text style={styles.brandSubline}>MATCHDAY LIVE</Text>
           </View>
           <View style={styles.headerActions}>
             {canAccessAdmin && (
@@ -4291,7 +4977,7 @@ function HomeScreen({
               </TouchableOpacity>
             )}
             <TouchableOpacity style={styles.iconButton} onPress={onSignOut}>
-              <Ionicons name="person-outline" size={20} color={colors.text} />
+              <Ionicons name="log-out-outline" size={20} color={colors.text} />
             </TouchableOpacity>
           </View>
         </View>
@@ -4300,37 +4986,98 @@ function HomeScreen({
           <Text style={styles.homeGreetingTitle}>{profile?.name ?? sessionLabelFallback(isLoadingData)} 님</Text>
         </View>
 
-        <Pressable
-          style={styles.featuredCard}
-          onPress={() => onNavigate('schedule')}
-        >
+        <View style={styles.featuredCard}>
           <View style={styles.featuredGlow} />
 
-          {featuredMatch ? (
-            <>
-              <PlayerDuelRow
-                homeTeamName={featuredMatch.homeTeam}
-                awayTeamName={featuredMatch.awayTeam}
-                homePlayers={featuredMatch.homePlayers}
-                awayPlayers={featuredMatch.awayPlayers}
-                avatarUrlByName={avatarUrlByName}
-                size="featured"
-              />
-              <Text style={styles.featuredTitle}>
-                {toDateLabel(featuredMatch.date)}({featuredMatch.weekday}) {featuredMatch.homeTeam} vs {featuredMatch.awayTeam}
-              </Text>
-              <Text style={styles.featuredSubtitle}>
-                {featuredMatch.place} 경기장 | Home {featuredMatch.homePlayers} | Away {featuredMatch.awayPlayers}
-              </Text>
-            </>
+          {featuredMatchPages.length > 0 ? (
+            <View
+              style={styles.featuredMatchPager}
+              onLayout={(event) => setFeaturedMatchWidth(event.nativeEvent.layout.width)}
+            >
+              {featuredMatchWidth > 0 && (
+                <ScrollView
+                  ref={featuredMatchScrollRef}
+                  horizontal
+                  pagingEnabled
+                  showsHorizontalScrollIndicator={false}
+                  onMomentumScrollEnd={onFeaturedMatchMomentumEnd}
+                  scrollEventThrottle={16}
+                >
+                  {featuredMatchPages.map((page) => (
+                    <View
+                      key={`${page.key}-${page.match.id}`}
+                      style={[styles.featuredMatchPage, { width: featuredMatchWidth }]}
+                    >
+                      <PlayerDuelRow
+                        homeTeamName={page.match.homeTeam}
+                        awayTeamName={page.match.awayTeam}
+                        homeTeamLogoUrl={page.match.homeTeamLogoUrl}
+                        awayTeamLogoUrl={page.match.awayTeamLogoUrl}
+                        homePlayers={page.match.homePlayers}
+                        awayPlayers={page.match.awayPlayers}
+                        avatarUrlByName={avatarUrlByName}
+                        memberIdByName={memberIdByName}
+                        currentUserId={profile?.id ?? null}
+                        getAttendanceStatusByMemberId={(memberId) => getCardStatusForPlayer(page.match.id, memberId)}
+                        attendanceEnabled={isTodayMatch(page.match)}
+                        isSavingAttendance={savingAttendanceMatchId === page.match.id}
+                        onToggleAttendance={() => onToggleAttendance(page.match)}
+                        size="featured"
+                      />
+                      <View style={styles.featuredMatchHeadline}>
+                        <View style={styles.featuredMatchTitleWrap}>
+                          <View style={styles.featuredMatchMetaRow}>
+                            <Text style={styles.featuredMatchEyebrow}>{page.label}</Text>
+                            <Text style={styles.featuredMatchDateText}>{toMatchDateDisplayLabel(page.match)}</Text>
+                          </View>
+                          <View style={styles.featuredTeamTitleRow}>
+                            <InlineTeamLogo logoUrl={page.match.homeTeamLogoUrl} teamName={page.match.homeTeam} />
+                            <Text style={styles.featuredMatchTeamName} numberOfLines={1}>{page.match.homeTeam}</Text>
+                          </View>
+                          <Text style={styles.featuredMatchVs}>VS</Text>
+                          <View style={styles.featuredTeamTitleRow}>
+                            <InlineTeamLogo logoUrl={page.match.awayTeamLogoUrl} teamName={page.match.awayTeam} />
+                            <Text style={styles.featuredMatchTeamName} numberOfLines={1}>{page.match.awayTeam}</Text>
+                          </View>
+                        </View>
+                      </View>
+                      <Text style={styles.featuredSubtitle}>
+                        {page.match.place} 경기장 | Home {page.match.homePlayers} | Away {page.match.awayPlayers}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
+              {featuredMatchPages.length > 1 && (
+                <View style={styles.featuredMatchPagerDots}>
+                  {featuredMatchPages.map((page, index) => (
+                    <View
+                      key={`featured-dot-${page.key}`}
+                      style={[
+                        styles.featuredMatchPagerDot,
+                        index === selectedFeaturedMatchPage && styles.featuredMatchPagerDotActive,
+                      ]}
+                    />
+                  ))}
+                </View>
+              )}
+            </View>
           ) : (
             <>
               <PlayerDuelRow
                 homeTeamName="HOME"
                 awayTeamName="AWAY"
+                homeTeamLogoUrl={null}
+                awayTeamLogoUrl={null}
                 homePlayers="-"
                 awayPlayers="-"
                 avatarUrlByName={avatarUrlByName}
+                memberIdByName={memberIdByName}
+                currentUserId={profile?.id ?? null}
+                getAttendanceStatusByMemberId={() => null}
+                attendanceEnabled={false}
+                isSavingAttendance={false}
+                onToggleAttendance={undefined}
                 size="featured"
               />
               <Text style={styles.featuredTitle}>등록된 대표 경기가 아직 없습니다.</Text>
@@ -4342,42 +5089,62 @@ function HomeScreen({
             <Text style={styles.featuredBottomButtonText}>전체 일정</Text>
           </TouchableOpacity>
 
-        </Pressable>
+        </View>
 
         <View style={styles.weeklyStatusCard}>
           <View style={styles.weeklyStatusGlowTop} />
           <View style={styles.weeklyStatusGlowBottom} />
           <View style={styles.weeklyStatusHeaderRow}>
-            <Text style={styles.weeklyStatusWeekLabel}>{currentWeekMatchSummary.weekLabel}</Text>
+            <Text style={styles.weeklyStatusWeekLabel}>{selectedWeekMatchSummary?.weekLabel ?? '이번주'}</Text>
             <Text style={styles.weeklyStatusMatchHeader}>경기 팀</Text>
             <Text style={styles.weeklyStatusResultHeader}>경기결과</Text>
           </View>
 
-          {currentWeekMatchSummary.matches.length > 0 ? currentWeekMatchSummary.matches.map((match) => {
-            const resultLabel = toMatchResultLabel(match);
-            const isPlayed = match.homeScore !== null && match.awayScore !== null;
+          <View
+            style={styles.weeklyStatusPager}
+            onLayout={(event) => setWeeklyStatusWidth(event.nativeEvent.layout.width)}
+          >
+            {weeklyStatusWidth > 0 && (
+              <ScrollView
+                ref={weeklyStatusScrollRef}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onMomentumScrollEnd={onWeeklyStatusMomentumEnd}
+                scrollEventThrottle={16}
+              >
+                {weeklyStatusPages.map((weekSummary) => (
+                  <View key={weekSummary.key} style={[styles.weeklyStatusPage, { width: weeklyStatusWidth }]}>
+                    {weekSummary.matches.length > 0 ? weekSummary.matches.map((match) => {
+                      const resultLabel = toMatchResultLabel(match);
+                      const isPlayed = match.homeScore !== null && match.awayScore !== null;
 
-            return (
-              <View key={`week-match-${match.id}`} style={styles.weeklyStatusRow}>
-                <View style={styles.weeklyStatusDateBadge}>
-                  <Text style={styles.weeklyStatusDate}>{toWeekMatchDateLabel(match.date)}</Text>
-                </View>
-                <Text style={styles.weeklyStatusMatchText}>
-                  {formatMatchTitleWithPlayers(match.homeTeam, match.homePlayers, match.awayTeam, match.awayPlayers)}
-                </Text>
-                <View
-                  style={[
-                    styles.weeklyStatusResultBadge,
-                    isPlayed ? styles.weeklyStatusResultBadgePlayed : styles.weeklyStatusResultBadgeUpcoming,
-                  ]}
-                >
-                  <Text style={styles.weeklyStatusResultValue}>{resultLabel}</Text>
-                </View>
-              </View>
-            );
-          }) : (
-            <Text style={styles.weeklyStatusEmptyText}>해당 주차에 등록된 경기가 없습니다.</Text>
-          )}
+                      return (
+                        <View key={`week-match-${match.id}`} style={styles.weeklyStatusRow}>
+                          <View style={styles.weeklyStatusDateBadge}>
+                            <Text style={styles.weeklyStatusDate}>{toWeekMatchDateLabel(match.date)}</Text>
+                          </View>
+                          <Text style={styles.weeklyStatusMatchText}>
+                            {formatMatchTitleWithPlayers(match.homeTeam, match.homePlayers, match.awayTeam, match.awayPlayers)}
+                          </Text>
+                          <View
+                            style={[
+                              styles.weeklyStatusResultBadge,
+                              isPlayed ? styles.weeklyStatusResultBadgePlayed : styles.weeklyStatusResultBadgeUpcoming,
+                            ]}
+                          >
+                            <Text style={styles.weeklyStatusResultValue}>{resultLabel}</Text>
+                          </View>
+                        </View>
+                      );
+                    }) : (
+                      <Text style={styles.weeklyStatusEmptyText}>해당 주차에 등록된 경기가 없습니다.</Text>
+                    )}
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+          </View>
         </View>
 
       </ScrollView>
@@ -4410,7 +5177,8 @@ function HomeScreen({
 function buildPlayerCards(
   playersText: string,
   fallbackTeamName: string,
-  avatarUrlByName: Record<string, string | null>
+  avatarUrlByName: Record<string, string | null>,
+  memberIdByName: Record<string, string>
 ) {
   const playerNames = parseMatchPlayerNames(playersText);
   if (playerNames.length === 0) {
@@ -4419,6 +5187,7 @@ function buildPlayerCards(
       label: fallbackTeamName,
       initials: getNameInitial(fallbackTeamName),
       avatarUrl: null,
+      memberId: null,
     }];
   }
 
@@ -4427,27 +5196,106 @@ function buildPlayerCards(
     label: name,
     initials: getNameInitial(name),
     avatarUrl: avatarUrlByName[name] ?? null,
+    memberId: memberIdByName[name] ?? null,
   }));
 }
 
 function PlayerDuelRow({
   homeTeamName,
   awayTeamName,
+  homeTeamLogoUrl,
+  awayTeamLogoUrl,
   homePlayers,
   awayPlayers,
   avatarUrlByName,
+  memberIdByName,
+  currentUserId,
+  getAttendanceStatusByMemberId,
+  attendanceEnabled,
+  isSavingAttendance,
+  onToggleAttendance,
   size,
 }: {
   homeTeamName: string;
   awayTeamName: string;
+  homeTeamLogoUrl: string | null;
+  awayTeamLogoUrl: string | null;
   homePlayers: string;
   awayPlayers: string;
   avatarUrlByName: Record<string, string | null>;
+  memberIdByName: Record<string, string>;
+  currentUserId: string | null;
+  getAttendanceStatusByMemberId: (memberId: string | null) => MatchAttendanceStatus | null;
+  attendanceEnabled: boolean;
+  isSavingAttendance: boolean;
+  onToggleAttendance?: () => void;
   size: 'featured' | 'compact';
 }) {
   const compact = size === 'compact';
-  const homeCards = buildPlayerCards(homePlayers, homeTeamName, avatarUrlByName);
-  const awayCards = buildPlayerCards(awayPlayers, awayTeamName, avatarUrlByName);
+  const homeCards = buildPlayerCards(homePlayers, homeTeamName, avatarUrlByName, memberIdByName);
+  const awayCards = buildPlayerCards(awayPlayers, awayTeamName, avatarUrlByName, memberIdByName);
+  const canToggleAttendance = attendanceEnabled && Boolean(onToggleAttendance) && !isSavingAttendance;
+
+  if (!compact) {
+    return (
+      <View style={[
+        styles.playerDuelFeaturedStage,
+        Platform.OS === 'android' && styles.playerDuelFeaturedStageAndroid,
+      ]}>
+        <View style={styles.playerDuelTeamRows}>
+          <View style={styles.playerDuelTeamRow}>
+            {homeCards.map((card) => (
+              <PlayerCard
+                key={card.key}
+                name={card.label}
+                initials={card.initials}
+                avatarUrl={card.avatarUrl}
+                attendanceStatus={getAttendanceStatusByMemberId(card.memberId)}
+                attendanceEnabled={card.memberId !== null && card.memberId === currentUserId && canToggleAttendance}
+                onPressAttendance={card.memberId !== null && card.memberId === currentUserId ? onToggleAttendance : undefined}
+                compact={false}
+              />
+            ))}
+          </View>
+          <View style={[styles.playerDuelTeamRow, styles.playerDuelTeamRowAway]}>
+            {awayCards.map((card) => (
+              <PlayerCard
+                key={card.key}
+                name={card.label}
+                initials={card.initials}
+                avatarUrl={card.avatarUrl}
+                attendanceStatus={getAttendanceStatusByMemberId(card.memberId)}
+                attendanceEnabled={card.memberId !== null && card.memberId === currentUserId && canToggleAttendance}
+                onPressAttendance={card.memberId !== null && card.memberId === currentUserId ? onToggleAttendance : undefined}
+                compact={false}
+              />
+            ))}
+          </View>
+        </View>
+        <View
+          pointerEvents="none"
+          style={[
+            styles.playerDuelCenterFeatured,
+            Platform.OS === 'android' && styles.playerDuelCenterFeaturedAndroid,
+          ]}
+        >
+          <View style={[
+            styles.playerDuelLogoFeaturedHome,
+            Platform.OS === 'android' && styles.playerDuelLogoFeaturedHomeAndroid,
+          ]}>
+            <TeamLogoBadge logoUrl={homeTeamLogoUrl} teamName={homeTeamName} compact={false} />
+          </View>
+          <Text style={styles.playerDuelVsFeatured}>VS</Text>
+          <View style={[
+            styles.playerDuelLogoFeaturedAway,
+            Platform.OS === 'android' && styles.playerDuelLogoFeaturedAwayAndroid,
+          ]}>
+            <TeamLogoBadge logoUrl={awayTeamLogoUrl} teamName={awayTeamName} compact={false} />
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.playerDuelRow, compact && styles.playerDuelRowCompact]}>
@@ -4458,11 +5306,16 @@ function PlayerDuelRow({
             name={card.label}
             initials={card.initials}
             avatarUrl={card.avatarUrl}
+            attendanceStatus={getAttendanceStatusByMemberId(card.memberId)}
+            attendanceEnabled={card.memberId !== null && card.memberId === currentUserId && canToggleAttendance}
+            onPressAttendance={card.memberId !== null && card.memberId === currentUserId ? onToggleAttendance : undefined}
             compact={compact}
           />
         ))}
       </View>
+      <TeamLogoBadge logoUrl={homeTeamLogoUrl} teamName={homeTeamName} compact={compact} />
       <Text style={[styles.playerDuelVs, compact && styles.playerDuelVsCompact]}>VS</Text>
+      <TeamLogoBadge logoUrl={awayTeamLogoUrl} teamName={awayTeamName} compact={compact} />
       <View style={[styles.playerDuelSide, styles.playerDuelSideAway, compact && styles.playerDuelSideCompact]}>
         {awayCards.map((card) => (
           <PlayerCard
@@ -4470,6 +5323,9 @@ function PlayerDuelRow({
             name={card.label}
             initials={card.initials}
             avatarUrl={card.avatarUrl}
+            attendanceStatus={getAttendanceStatusByMemberId(card.memberId)}
+            attendanceEnabled={card.memberId !== null && card.memberId === currentUserId && canToggleAttendance}
+            onPressAttendance={card.memberId !== null && card.memberId === currentUserId ? onToggleAttendance : undefined}
             compact={compact}
           />
         ))}
@@ -4478,19 +5334,83 @@ function PlayerDuelRow({
   );
 }
 
+function TeamLogoBadge({
+  logoUrl,
+  teamName,
+  compact,
+}: {
+  logoUrl: string | null;
+  teamName: string;
+  compact: boolean;
+}) {
+  const resolvedLogoUrl = resolveStoragePublicUrl(TEAM_LOGO_BUCKET, logoUrl);
+
+  return (
+    <View style={[styles.teamDuelLogoWrap, compact && styles.teamDuelLogoWrapCompact]}>
+      <Image
+        source={resolvedLogoUrl ? { uri: resolvedLogoUrl } : FALLBACK_TEAM_LOGO}
+        style={styles.teamDuelLogo}
+        resizeMode="contain"
+        accessibilityLabel={`${teamName} 로고`}
+      />
+    </View>
+  );
+}
+
+function InlineTeamLogo({
+  logoUrl,
+  teamName,
+}: {
+  logoUrl: string | null;
+  teamName: string;
+}) {
+  const resolvedLogoUrl = resolveStoragePublicUrl(TEAM_LOGO_BUCKET, logoUrl);
+
+  return (
+    <View style={styles.featuredInlineLogoWrap}>
+      <Image
+        source={resolvedLogoUrl ? { uri: resolvedLogoUrl } : FALLBACK_TEAM_LOGO}
+        style={styles.featuredInlineLogo}
+        resizeMode="contain"
+        accessibilityLabel={`${teamName} 로고`}
+      />
+    </View>
+  );
+}
+
 function PlayerCard({
   name,
   initials,
   avatarUrl,
+  attendanceStatus,
+  attendanceEnabled,
+  onPressAttendance,
   compact,
 }: {
   name: string;
   initials: string;
   avatarUrl: string | null;
+  attendanceStatus: MatchAttendanceStatus | null;
+  attendanceEnabled: boolean;
+  onPressAttendance?: () => void;
   compact: boolean;
 }) {
+  const hasAttendanceState = attendanceStatus !== null;
+
   return (
-    <View style={[styles.playerCard, compact && styles.playerCardCompact]}>
+    <TouchableOpacity
+      style={[
+        styles.playerCard,
+        !compact && Platform.OS === 'android' && styles.playerCardAndroid,
+        compact && styles.playerCardCompact,
+        hasAttendanceState && styles.playerCardMine,
+        attendanceStatus === 'attend' && styles.playerCardAttend,
+        attendanceStatus === 'absent' && styles.playerCardAbsent,
+      ]}
+      onPress={onPressAttendance}
+      disabled={!attendanceEnabled}
+      activeOpacity={0.85}
+    >
       <View style={[styles.playerCardImageWrap, compact && styles.playerCardImageWrapCompact]}>
         {avatarUrl ? (
           <Image source={{ uri: avatarUrl }} style={styles.playerCardAvatarImage} resizeMode="contain" />
@@ -4505,7 +5425,17 @@ function PlayerCard({
       <Text numberOfLines={1} style={[styles.playerCardName, compact && styles.playerCardNameCompact]}>
         {name}
       </Text>
-    </View>
+      {attendanceStatus === 'attend' && (
+        <View style={styles.playerCardBadgeAttend}>
+          <Ionicons name="checkmark" size={10} color="#052d0f" />
+        </View>
+      )}
+      {attendanceStatus === 'absent' && (
+        <View style={styles.playerCardBadgeAbsent}>
+          <Ionicons name="close" size={10} color="#3b0a0a" />
+        </View>
+      )}
+    </TouchableOpacity>
   );
 }
 
@@ -4839,8 +5769,25 @@ function TeamsScreen({
       </Text>
       {teams.map((t) => (
         <View key={t.id} style={[styles.listCard, { marginTop: 10 }]}>
-          <Text style={styles.body}>{t.name}</Text>
-          <Text style={styles.muted}>팀원 {t.memberCount}명</Text>
+          <View style={styles.teamListRow}>
+            <View style={styles.teamListLogoWrap}>
+              {(() => {
+                const teamLogoUrl = resolveStoragePublicUrl(TEAM_LOGO_BUCKET, t.emblemUrl);
+                return (
+                  <Image
+                    source={teamLogoUrl ? { uri: teamLogoUrl } : FALLBACK_TEAM_LOGO}
+                    style={styles.teamListLogo}
+                  />
+                );
+              })()}
+            </View>
+            <View style={styles.teamListTextWrap}>
+              <Text style={styles.body}>{t.name}</Text>
+              <Text style={styles.muted} numberOfLines={1}>
+                {t.memberNames.length > 0 ? t.memberNames.join(', ') : '팀원 없음'}
+              </Text>
+            </View>
+          </View>
         </View>
       ))}
       {teams.length === 0 && <Text style={styles.muted}>Supabase에 등록된 팀이 없습니다.</Text>}
@@ -4939,6 +5886,8 @@ function LeagueScreen({
   data,
   recentByTeam,
   avatarByTeamName,
+  memberNamesByTeamName,
+  teamLogoByTeamName,
   isLoading,
   title,
   onSelectSeason,
@@ -4949,6 +5898,8 @@ function LeagueScreen({
   data: LeagueRow[];
   recentByTeam: Record<string, TeamRecentResult[]>;
   avatarByTeamName: Record<string, Array<string | null>>;
+  memberNamesByTeamName: Record<string, string[]>;
+  teamLogoByTeamName: Record<string, string | null>;
   isLoading: boolean;
   title: string;
   onSelectSeason: (seasonId: number) => void;
@@ -5016,6 +5967,30 @@ function LeagueScreen({
     );
   };
 
+  const renderTeamLogo = (teamName: string) => {
+    const teamLogoUrl = resolveStoragePublicUrl(TEAM_LOGO_BUCKET, teamLogoByTeamName[teamName] ?? null);
+    return (
+      <View style={styles.leagueTeamBadgeImageWrap}>
+        <Image
+          source={teamLogoUrl ? { uri: teamLogoUrl } : FALLBACK_TEAM_LOGO}
+          style={styles.leagueTeamBadgeImage}
+        />
+      </View>
+    );
+  };
+
+  const renderTeamName = (teamName: string, textStyle: object) => {
+    const memberNames = memberNamesByTeamName[teamName] ?? [];
+    return (
+      <Text style={textStyle} numberOfLines={1}>
+        {teamName}
+        {memberNames.length > 0 && (
+          <Text style={styles.leagueTeamPlayersText}> ({memberNames.join(', ')})</Text>
+        )}
+      </Text>
+    );
+  };
+
   return (
     <View style={styles.leaguePage}>
       <TouchableOpacity onPress={goBack}>
@@ -5049,16 +6024,14 @@ function LeagueScreen({
             {data.map((row) => {
               const recentResults = recentByTeam[row.team] ?? [];
               return (
-                <View key={`mobile-standing-${row.rank}`} style={styles.leagueMobileCard}>
+                <View key={`mobile-standing-${row.rank}-${row.team}`} style={styles.leagueMobileCard}>
                   <View style={styles.leagueMobileTopRow}>
                     <View style={styles.leagueMobileRankWrap}>
                       <Text style={styles.leagueMobileRank}>{row.rank}</Text>
                     </View>
                     <View style={styles.leagueMobileTeamWrap}>
-                      <View style={styles.leagueTeamBadge}>
-                        <Text style={styles.leagueTeamBadgeText}>{row.team.slice(0, 1)}</Text>
-                      </View>
-                      <Text style={styles.leagueMobileTeamName} numberOfLines={1}>{row.team}</Text>
+                      {renderTeamLogo(row.team)}
+                      {renderTeamName(row.team, styles.leagueMobileTeamName)}
                       {renderTeamProfileAvatar(row.team)}
                     </View>
                     <View style={styles.leagueMobilePointWrap}>
@@ -5134,13 +6107,11 @@ function LeagueScreen({
               {data.map((row) => {
                 const recentResults = recentByTeam[row.team] ?? [];
                 return (
-                  <View key={row.rank} style={styles.leagueTableRow}>
+                  <View key={`standing-${row.rank}-${row.team}`} style={styles.leagueTableRow}>
                     <Text style={styles.leagueTableCell}>{row.rank}</Text>
                     <View style={[styles.leagueTableTeamCell, styles.leagueTeamCellWrap]}>
-                      <View style={styles.leagueTeamBadge}>
-                        <Text style={styles.leagueTeamBadgeText}>{row.team.slice(0, 1)}</Text>
-                      </View>
-                      <Text style={styles.leagueTeamNameText} numberOfLines={1}>{row.team}</Text>
+                      {renderTeamLogo(row.team)}
+                      {renderTeamName(row.team, styles.leagueTeamNameText)}
                       {renderTeamProfileAvatar(row.team)}
                     </View>
                     <Text style={[styles.leagueTableCell, styles.leaguePointsCell]}>{row.points}</Text>
@@ -6691,6 +7662,7 @@ function SeasonTeamManagementScreen({
   isLoadingRows,
   isSaving,
   onSave,
+  onShowMessage,
   goBack,
 }: {
   season: Season;
@@ -6700,6 +7672,7 @@ function SeasonTeamManagementScreen({
   isLoadingRows: boolean;
   isSaving: boolean;
   onSave: (seasonId: number, rows: TeamDraftRow[]) => void;
+  onShowMessage: (title: string, message?: string) => void;
   goBack: () => void;
 }) {
   const [rows, setRows] = useState<TeamDraftRow[]>(initialRows);
@@ -6719,12 +7692,59 @@ function SeasonTeamManagementScreen({
 
   const updateRow = (
     rowId: string,
-    key: 'playerOneId' | 'playerTwoId' | 'teamName',
+    key: 'playerOneId' | 'playerTwoId' | 'teamName' | 'emblemUrl',
     value: string | null
   ) => {
     setRows((prev) =>
-      prev.map((row) => (row.id === rowId ? { ...row, [key]: value ?? '' } : row))
+      prev.map((row) => {
+        if (row.id !== rowId) {
+          return row;
+        }
+
+        if (key === 'emblemUrl') {
+          return { ...row, emblemUrl: value };
+        }
+
+        return { ...row, [key]: value ?? '' };
+      })
     );
+  };
+
+  const updateRowAsset = (rowId: string, logoAsset: DocumentPickerAsset | null) => {
+    setRows((prev) =>
+      prev.map((row) =>
+        row.id === rowId
+          ? {
+              ...row,
+              logoAsset,
+            }
+          : row
+      )
+    );
+  };
+
+  const pickLogoForRow = async (rowId: string) => {
+    const res = await DocumentPicker.getDocumentAsync({
+      type: 'image/*',
+      copyToCacheDirectory: true,
+      multiple: false,
+    });
+
+    if (res.canceled) {
+      return;
+    }
+
+    const asset = res.assets[0];
+    if (!asset) {
+      return;
+    }
+
+    if (asset.mimeType && !asset.mimeType.startsWith('image/')) {
+      onShowMessage('파일 확인', '팀 로고는 이미지 파일만 선택할 수 있습니다.');
+      return;
+    }
+
+    updateRowAsset(rowId, asset);
   };
 
   const addTeamRow = () => {
@@ -6741,13 +7761,13 @@ function SeasonTeamManagementScreen({
       </TouchableOpacity>
 
       <Text style={styles.logoTitle}>{season.name} 팀 관리</Text>
-      <Text style={styles.muted}>선수는 selectbox로, 팀은 텍스트 입력으로 등록 행을 구성합니다.</Text>
+      <Text style={styles.muted}>선수는 selectbox로, 팀명과 로고 파일을 함께 등록하는 방식입니다.</Text>
 
       <View style={styles.adminSeasonPanel}>
         <View style={styles.seasonTeamHeaderRow}>
           <View>
             <Text style={styles.noticeTitle}>팀 편성 테이블</Text>
-            <Text style={styles.noticeText}>팀 추가를 누르면 하단에 팀 등록 행 UI가 계속 추가됩니다.</Text>
+            <Text style={styles.noticeText}>팀 추가를 누르면 하단에 팀 등록 행 UI가 계속 추가됩니다. 로고는 파일 업로드식으로 등록합니다.</Text>
           </View>
           <TouchableOpacity
             style={[styles.secondaryButton, styles.seasonTeamTopAddButton]}
@@ -6758,60 +7778,104 @@ function SeasonTeamManagementScreen({
           </TouchableOpacity>
         </View>
 
-        <View style={styles.seasonTeamTable}>
-          <View style={styles.seasonTeamTableHeaderRow}>
-            <Text style={[styles.seasonTeamTableHeaderCell, styles.seasonTeamTeamLabelCell]} />
-            <Text style={styles.seasonTeamTableHeaderCell}>선수 1</Text>
-            <Text style={styles.seasonTeamTableHeaderCell}>선수 2</Text>
-            <Text style={styles.seasonTeamTableHeaderCell}>팀</Text>
-            <Text style={[styles.seasonTeamTableHeaderCell, styles.seasonTeamDeleteHeaderCell]}>삭제</Text>
-          </View>
-          {rows.map((row, index) => (
-            <View key={row.id} style={styles.seasonTeamTableBodyRow}>
-              <Text style={[styles.seasonTeamTableBodyCell, styles.seasonTeamTeamLabelCell]}>{index + 1}팀</Text>
-              <View style={styles.seasonTeamSelectCell}>
-                <SelectBox
-                  options={memberOptions}
-                  value={row.playerOneId}
-                  placeholder="선수 선택"
-                  onChange={(value) => updateRow(row.id, 'playerOneId', value)}
-                  disabled={isSaving}
-                />
-              </View>
-              <View style={styles.seasonTeamSelectCell}>
-                <SelectBox
-                  options={memberOptions}
-                  value={row.playerTwoId}
-                  placeholder="선수 선택"
-                  onChange={(value) => updateRow(row.id, 'playerTwoId', value)}
-                  disabled={isSaving}
-                />
-              </View>
-              <View style={styles.seasonTeamSelectCell}>
-                <Input
-                  value={row.teamName}
-                  onChangeText={(value) => updateRow(row.id, 'teamName', value)}
-                  placeholder="팀명 입력"
-                  style={styles.seasonTeamTextInput}
-                  editable={!isSaving}
-                />
-              </View>
-              <View style={[styles.seasonTeamSelectCell, styles.seasonTeamDeleteCell]}>
-                <TouchableOpacity
-                  style={[
-                    styles.secondaryButton,
-                    styles.seasonTeamDeleteButton,
-                    (rows.length <= 2 || isSaving) && styles.buttonDisabled,
-                  ]}
-                  onPress={() => setRows((prev) => prev.filter((item) => item.id !== row.id))}
-                  disabled={rows.length <= 2 || isSaving}
-                >
-                  <Text style={styles.secondaryButtonText}>팀 삭제</Text>
-                </TouchableOpacity>
-              </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View style={styles.seasonTeamTable}>
+            <View style={styles.seasonTeamTableHeaderRow}>
+              <Text style={[styles.seasonTeamTableHeaderCell, styles.seasonTeamTeamLabelCell]} />
+              <Text style={styles.seasonTeamTableHeaderCell}>선수 1</Text>
+              <Text style={styles.seasonTeamTableHeaderCell}>선수 2</Text>
+              <Text style={styles.seasonTeamTableHeaderCell}>팀</Text>
+              <Text style={[styles.seasonTeamTableHeaderCell, styles.seasonTeamLogoHeaderCell]}>로고</Text>
+              <Text style={[styles.seasonTeamTableHeaderCell, styles.seasonTeamDeleteHeaderCell]}>삭제</Text>
             </View>
-          ))}
-        </View>
+            {rows.map((row, index) => (
+              <View key={row.id} style={styles.seasonTeamTableBodyRow}>
+                <Text style={[styles.seasonTeamTableBodyCell, styles.seasonTeamTeamLabelCell]}>{index + 1}팀</Text>
+                <View style={styles.seasonTeamSelectCell}>
+                  <SelectBox
+                    options={memberOptions}
+                    value={row.playerOneId}
+                    placeholder="선수 선택"
+                    onChange={(value) => updateRow(row.id, 'playerOneId', value)}
+                    disabled={isSaving}
+                  />
+                </View>
+                <View style={styles.seasonTeamSelectCell}>
+                  <SelectBox
+                    options={memberOptions}
+                    value={row.playerTwoId}
+                    placeholder="선수 선택"
+                    onChange={(value) => updateRow(row.id, 'playerTwoId', value)}
+                    disabled={isSaving}
+                  />
+                </View>
+                <View style={styles.seasonTeamSelectCell}>
+                  <Input
+                    value={row.teamName}
+                    onChangeText={(value) => updateRow(row.id, 'teamName', value)}
+                    placeholder="팀명 입력"
+                    style={styles.seasonTeamTextInput}
+                    editable={!isSaving}
+                  />
+                </View>
+                <View style={styles.seasonTeamLogoCell}>
+                  <View style={styles.seasonTeamLogoPreviewWrap}>
+                    {(() => {
+                      const logoPreviewUrl = row.logoAsset?.uri ?? resolveStoragePublicUrl(TEAM_LOGO_BUCKET, row.emblemUrl);
+                      if (!logoPreviewUrl) {
+                        return (
+                          <View style={styles.seasonTeamLogoPlaceholder}>
+                            <Text style={styles.seasonTeamLogoPlaceholderText}>NO LOGO</Text>
+                          </View>
+                        );
+                      }
+                      return <Image source={{ uri: logoPreviewUrl }} style={styles.seasonTeamLogoImage} />;
+                    })()}
+                  </View>
+                  <Text style={styles.seasonTeamLogoMeta} numberOfLines={1}>
+                    {row.logoAsset?.name || (row.emblemUrl ? '등록된 로고 있음' : '로고 없음')}
+                  </Text>
+                  <View style={styles.seasonTeamLogoActionRow}>
+                    <TouchableOpacity
+                      style={[styles.secondaryButton, styles.seasonTeamLogoActionButton, isSaving && styles.buttonDisabled]}
+                      onPress={() => pickLogoForRow(row.id)}
+                      disabled={isSaving}
+                    >
+                      <Text style={styles.secondaryButtonText}>{row.logoAsset || row.emblemUrl ? '다시 선택' : '로고 선택'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.secondaryButton,
+                        styles.seasonTeamLogoActionButton,
+                        !row.logoAsset && !row.emblemUrl && styles.buttonDisabled,
+                      ]}
+                      onPress={() => {
+                        updateRowAsset(row.id, null);
+                        updateRow(row.id, 'emblemUrl', null);
+                      }}
+                      disabled={(!row.logoAsset && !row.emblemUrl) || isSaving}
+                    >
+                      <Text style={styles.secondaryButtonText}>삭제</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                <View style={[styles.seasonTeamSelectCell, styles.seasonTeamDeleteCell]}>
+                  <TouchableOpacity
+                    style={[
+                      styles.secondaryButton,
+                      styles.seasonTeamDeleteButton,
+                      (rows.length <= 2 || isSaving) && styles.buttonDisabled,
+                    ]}
+                    onPress={() => setRows((prev) => prev.filter((item) => item.id !== row.id))}
+                    disabled={rows.length <= 2 || isSaving}
+                  >
+                    <Text style={styles.secondaryButtonText}>팀 삭제</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+          </View>
+        </ScrollView>
         {isLoadingRows && <Text style={styles.muted}>기존 팀 편성 데이터를 불러오는 중입니다...</Text>}
         {isLoadingMembers && <Text style={styles.muted}>회원 목록을 불러오는 중입니다...</Text>}
         {!isLoadingMembers && memberOptions.length === 0 && (
@@ -7169,6 +8233,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.bg,
+    paddingTop: ANDROID_STATUS_BAR_GAP,
   },
   homeShell: {
     flex: 1,
@@ -7196,7 +8261,7 @@ const styles = StyleSheet.create({
   },
   adminSidebarEyebrow: {
     color: colors.neon,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 1.6,
   },
@@ -7226,7 +8291,7 @@ const styles = StyleSheet.create({
   },
   adminSidebarItemMeta: {
     color: colors.sub,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     marginTop: 4,
   },
@@ -7260,7 +8325,7 @@ const styles = StyleSheet.create({
   },
   adminBadgeText: {
     color: colors.neon,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   adminBadgeMuted: {
@@ -7273,7 +8338,7 @@ const styles = StyleSheet.create({
   },
   adminBadgeMutedText: {
     color: colors.accent,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   adminStatusGrid: {
@@ -7293,7 +8358,7 @@ const styles = StyleSheet.create({
   },
   adminStatusLabel: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   adminStatusValue: {
@@ -7333,7 +8398,7 @@ const styles = StyleSheet.create({
   },
   adminActionBadge: {
     color: colors.sub,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
   },
   adminActionTitle: {
@@ -7343,8 +8408,8 @@ const styles = StyleSheet.create({
   },
   adminActionDescription: {
     color: colors.sub,
-    fontSize: 13,
-    lineHeight: 20,
+    fontSize: 14,
+    lineHeight: 21,
   },
   adminInsightGrid: {
     gap: 12,
@@ -7405,14 +8470,14 @@ const styles = StyleSheet.create({
   },
   adminSeasonActionMeta: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 4,
     fontWeight: '700',
   },
   adminSeasonHint: {
     color: colors.sub,
-    fontSize: 12,
-    lineHeight: 18,
+    fontSize: 13,
+    lineHeight: 20,
   },
   adminFormCard: {
     backgroundColor: colors.surfaceAlt,
@@ -7447,13 +8512,13 @@ const styles = StyleSheet.create({
   },
   adminSeasonListDescription: {
     color: colors.text,
-    fontSize: 13,
-    lineHeight: 20,
+    fontSize: 14,
+    lineHeight: 21,
   },
   adminSeasonListMeta: {
     color: colors.sub,
-    fontSize: 12,
-    lineHeight: 18,
+    fontSize: 13,
+    lineHeight: 20,
   },
   adminSeasonStatusBadge: {
     borderRadius: 999,
@@ -7473,7 +8538,7 @@ const styles = StyleSheet.create({
   },
   adminSeasonStatusText: {
     color: colors.text,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
   },
   textArea: {
@@ -7484,7 +8549,7 @@ const styles = StyleSheet.create({
   homeContent: {
     paddingHorizontal: 8,
     paddingTop: 12,
-    paddingBottom: 120,
+    paddingBottom: 120 + ANDROID_NAV_BAR_GAP,
   },
   card: {
     backgroundColor: colors.card,
@@ -7494,40 +8559,20 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     gap: 10,
   },
-  logoCircle: {
-    width: 92,
-    height: 92,
-    borderRadius: 46,
-    backgroundColor: colors.neon,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 18,
-    shadowColor: colors.neon,
-    shadowOpacity: 0.38,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 12,
-  },
-  logoText: {
-    fontWeight: '800',
-    fontSize: 34,
-    color: colors.bg,
-    fontStyle: 'italic',
-  },
   logoTitle: {
     color: colors.neon,
     fontWeight: '800',
     fontSize: 22,
   },
   brandWordmark: {
-    color: colors.text,
+    color: colors.neon,
     fontWeight: '900',
-    fontSize: 24,
-    letterSpacing: 1,
+    fontSize: 30,
+    letterSpacing: 0,
   },
   brandSubline: {
     color: colors.neon,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     letterSpacing: 1.8,
     marginTop: 2,
@@ -7562,9 +8607,9 @@ const styles = StyleSheet.create({
   },
   homeGreetingText: {
     color: colors.sub,
-    fontSize: 13,
+    fontSize: 14,
     marginTop: 6,
-    lineHeight: 18,
+    lineHeight: 20,
   },
   featuredCard: {
     position: 'relative',
@@ -7587,6 +8632,29 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(57, 255, 20, 0.12)',
     transform: [{ scaleX: 1.2 }],
   },
+  featuredMatchPager: {
+    minHeight: 0,
+  },
+  featuredMatchPage: {
+    flexShrink: 0,
+  },
+  featuredMatchPagerDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 2,
+  },
+  featuredMatchPagerDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#31445c',
+  },
+  featuredMatchPagerDotActive: {
+    width: 16,
+    backgroundColor: colors.neon,
+  },
   featuredBadges: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
@@ -7604,7 +8672,7 @@ const styles = StyleSheet.create({
   previewBadgeText: {
     color: colors.neon,
     fontWeight: '800',
-    fontSize: 12,
+    fontSize: 13,
   },
   featuredMetaButton: {
     borderRadius: 999,
@@ -7617,7 +8685,7 @@ const styles = StyleSheet.create({
   featuredMetaButtonText: {
     color: colors.text,
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 13,
   },
   featuredBottomButton: {
     alignSelf: 'flex-end',
@@ -7632,7 +8700,7 @@ const styles = StyleSheet.create({
   featuredBottomButtonText: {
     color: '#edf3ff',
     fontWeight: '800',
-    fontSize: 12,
+    fontSize: 13,
   },
   playerDuelRow: {
     flexDirection: 'row',
@@ -7641,6 +8709,42 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 14,
     marginBottom: 16,
+  },
+  playerDuelRowFeatured: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    justifyContent: 'space-between',
+    gap: 10,
+    minHeight: 276,
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  playerDuelRowFeaturedAndroid: {
+    gap: 6,
+    minHeight: 256,
+  },
+  playerDuelFeaturedStage: {
+    position: 'relative',
+    minHeight: 276,
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  playerDuelFeaturedStageAndroid: {
+    minHeight: 256,
+  },
+  playerDuelTeamRows: {
+    flex: 1,
+    justifyContent: 'space-between',
+    gap: 24,
+  },
+  playerDuelTeamRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  playerDuelTeamRowAway: {
+    alignItems: 'center',
   },
   playerDuelRowCompact: {
     marginTop: 0,
@@ -7653,6 +8757,7 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
     alignItems: 'center',
+    minWidth: 0,
   },
   playerDuelSideCompact: {
     gap: 6,
@@ -7660,14 +8765,89 @@ const styles = StyleSheet.create({
   playerDuelSideAway: {
     justifyContent: 'flex-end',
   },
+  playerDuelSideFeatured: {
+    width: 82,
+    gap: 14,
+    justifyContent: 'space-between',
+  },
+  playerDuelSideFeaturedAndroid: {
+    width: 72,
+    gap: 10,
+  },
+  playerDuelSideFeaturedAway: {
+    alignItems: 'flex-end',
+  },
+  playerDuelCenterFeatured: {
+    position: 'absolute',
+    top: 0,
+    right: 86,
+    bottom: 0,
+    left: 86,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 0,
+    minWidth: 96,
+  },
+  playerDuelCenterFeaturedAndroid: {
+    right: 74,
+    left: 74,
+    minWidth: 78,
+    paddingVertical: 0,
+  },
+  playerDuelLogoFeaturedHome: {
+    transform: [{ translateY: -28 }],
+  },
+  playerDuelLogoFeaturedHomeAndroid: {
+    transform: [{ translateY: -34 }],
+  },
+  playerDuelLogoFeaturedAway: {
+    transform: [{ translateY: 28 }],
+  },
+  playerDuelLogoFeaturedAwayAndroid: {
+    transform: [{ translateY: 34 }],
+  },
   playerDuelVs: {
     color: colors.neon,
     fontSize: 20,
     fontWeight: '900',
     letterSpacing: 1.2,
   },
+  playerDuelVsFeatured: {
+    color: colors.neon,
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: '900',
+    letterSpacing: 1.4,
+  },
   playerDuelVsCompact: {
     fontSize: 14,
+  },
+  teamDuelLogoWrap: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    borderWidth: 1,
+    borderColor: '#6c8429',
+    backgroundColor: 'rgba(11, 15, 22, 0.82)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+    shadowColor: colors.neon,
+    shadowOpacity: 0.28,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 5,
+    flexShrink: 0,
+  },
+  teamDuelLogoWrapCompact: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    padding: 5,
+  },
+  teamDuelLogo: {
+    width: '100%',
+    height: '100%',
   },
   playerCard: {
     width: 74,
@@ -7684,12 +8864,34 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     elevation: 5,
   },
+  playerCardAndroid: {
+    width: 66,
+    borderRadius: 12,
+    paddingHorizontal: 3,
+    paddingTop: 3,
+    paddingBottom: 5,
+  },
   playerCardCompact: {
     width: 52,
     borderRadius: 11,
     paddingHorizontal: 3,
     paddingTop: 3,
     paddingBottom: 4,
+  },
+  playerCardMine: {
+    borderColor: '#48608a',
+  },
+  playerCardAttend: {
+    borderColor: '#39ff14',
+    backgroundColor: '#123119',
+    shadowColor: '#39ff14',
+    shadowOpacity: 0.34,
+  },
+  playerCardAbsent: {
+    borderColor: '#ff6b6b',
+    backgroundColor: '#34161a',
+    shadowColor: '#ff6b6b',
+    shadowOpacity: 0.25,
   },
   playerCardImageWrap: {
     width: '100%',
@@ -7725,12 +8927,38 @@ const styles = StyleSheet.create({
   },
   playerCardName: {
     color: '#f4edcf',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     textAlign: 'center',
   },
   playerCardNameCompact: {
-    fontSize: 8,
+    fontSize: 9,
+  },
+  playerCardBadgeAttend: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#72ff57',
+    borderWidth: 1,
+    borderColor: '#39ff14',
+  },
+  playerCardBadgeAbsent: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ff8a8a',
+    borderWidth: 1,
+    borderColor: '#ff5252',
   },
   featuredTitle: {
     color: colors.text,
@@ -7739,10 +8967,69 @@ const styles = StyleSheet.create({
     lineHeight: 32,
     marginBottom: 8,
   },
+  featuredMatchHeadline: {
+    marginBottom: 10,
+  },
+  featuredMatchTitleWrap: {
+    minWidth: 0,
+    gap: 5,
+  },
+  featuredMatchMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 4,
+  },
+  featuredMatchEyebrow: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  featuredMatchDateText: {
+    color: '#dbe7f5',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  featuredTeamTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    minWidth: 0,
+  },
+  featuredInlineLogoWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: '#6c8429',
+    backgroundColor: 'rgba(11, 15, 22, 0.86)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 4,
+    flexShrink: 0,
+  },
+  featuredInlineLogo: {
+    width: '100%',
+    height: '100%',
+  },
+  featuredMatchTeamName: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 25,
+    lineHeight: 31,
+    fontWeight: '900',
+  },
+  featuredMatchVs: {
+    color: colors.neon,
+    fontSize: 15,
+    fontWeight: '900',
+    marginLeft: 43,
+  },
   featuredSubtitle: {
     color: colors.sub,
-    fontSize: 13,
-    lineHeight: 20,
+    fontSize: 14,
+    lineHeight: 21,
     marginBottom: 18,
   },
   weeklyStatusCard: {
@@ -7798,14 +9085,14 @@ const styles = StyleSheet.create({
   weeklyStatusMatchHeader: {
     flex: 1,
     color: '#b4c7df',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
     letterSpacing: 0.2,
   },
   weeklyStatusResultHeader: {
     width: 62,
     color: '#b4c7df',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
     textAlign: 'right',
     letterSpacing: 0.2,
@@ -7817,6 +9104,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#253952',
+  },
+  weeklyStatusPager: {
+    minHeight: 54,
+  },
+  weeklyStatusPage: {
+    flexShrink: 0,
   },
   weeklyStatusDateBadge: {
     width: 76,
@@ -7830,15 +9123,15 @@ const styles = StyleSheet.create({
   },
   weeklyStatusDate: {
     color: '#dbe7f5',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   weeklyStatusMatchText: {
     flex: 1,
     color: '#edf3ff',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
-    lineHeight: 18,
+    lineHeight: 19,
   },
   weeklyStatusResultBadge: {
     width: 62,
@@ -7858,7 +9151,7 @@ const styles = StyleSheet.create({
   },
   weeklyStatusResultValue: {
     color: '#f4fbff',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
     textAlign: 'center',
   },
@@ -8114,7 +9407,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 8,
     right: 8,
-    bottom: 20,
+    bottom: 20 + ANDROID_NAV_BAR_GAP,
     flexDirection: 'row',
     justifyContent: 'space-between',
     backgroundColor: 'rgba(17, 24, 39, 0.96)',
@@ -8138,7 +9431,7 @@ const styles = StyleSheet.create({
   },
   bottomTabText: {
     color: colors.sub,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   bottomTabTextActive: {
@@ -8150,9 +9443,9 @@ const styles = StyleSheet.create({
   },
   authShell: {
     minHeight: '100%',
-    paddingTop: 48,
+    paddingTop: 72,
     paddingHorizontal: 8,
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
   },
   authHero: {
     alignItems: 'center',
@@ -8161,9 +9454,9 @@ const styles = StyleSheet.create({
   authTitle: {
     color: colors.neon,
     fontWeight: '900',
-    fontSize: 32,
+    fontSize: 44,
     fontStyle: 'italic',
-    letterSpacing: 0.4,
+    lineHeight: 50,
   },
   authSubtitle: {
     color: '#8b8b8b',
@@ -8182,7 +9475,7 @@ const styles = StyleSheet.create({
   backLink: {
     color: colors.neon,
     fontWeight: '800',
-    fontSize: 12,
+    fontSize: 13,
   },
   signupTitle: {
     color: colors.neon,
@@ -8203,11 +9496,12 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginTop: 10,
     marginBottom: 8,
-    fontSize: 13,
+    fontSize: 14,
   },
   input: {
     backgroundColor: '#222222',
     color: colors.text,
+    fontSize: 16,
     borderRadius: 14,
     paddingHorizontal: 18,
     paddingVertical: 16,
@@ -8263,15 +9557,18 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: colors.text,
     fontWeight: '700',
+    fontSize: 14,
   },
   muted: {
     color: colors.sub,
-    fontSize: 13,
+    fontSize: 14,
+    lineHeight: 20,
     marginTop: 4,
   },
   link: {
     color: colors.neon,
     fontWeight: '700',
+    fontSize: 14,
   },
   authFooterRow: {
     flexDirection: 'row',
@@ -8296,17 +9593,18 @@ const styles = StyleSheet.create({
   },
   noticeText: {
     color: colors.sub,
-    lineHeight: 20,
+    fontSize: 14,
+    lineHeight: 21,
     marginBottom: 10,
   },
   footerHint: {
     color: '#6f6f6f',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
   },
   footerLink: {
     color: colors.neon,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
   },
   noticeActionRow: {
@@ -8322,7 +9620,7 @@ const styles = StyleSheet.create({
   },
   noticeDeleteLink: {
     color: '#f87171',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
   },
   genderChip: {
@@ -8414,7 +9712,7 @@ const styles = StyleSheet.create({
   },
   memberBadgeText: {
     color: colors.text,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
   },
   memberDeleteButton: {
@@ -8427,7 +9725,7 @@ const styles = StyleSheet.create({
   },
   memberDeleteButtonText: {
     color: '#fca5a5',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
   },
   memberControlBlock: {
@@ -8435,7 +9733,7 @@ const styles = StyleSheet.create({
   },
   memberControlLabel: {
     color: colors.accent,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   memberChipRow: {
@@ -8460,7 +9758,7 @@ const styles = StyleSheet.create({
   },
   memberChipText: {
     color: colors.text,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   memberChipTextSelected: {
@@ -8486,6 +9784,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   seasonTeamTable: {
+    minWidth: 860,
     borderWidth: 1,
     borderColor: '#24441f',
     borderRadius: 12,
@@ -8506,7 +9805,7 @@ const styles = StyleSheet.create({
   seasonTeamTableHeaderCell: {
     flex: 1,
     color: colors.text,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
     paddingHorizontal: 8,
     paddingVertical: 10,
@@ -8515,7 +9814,7 @@ const styles = StyleSheet.create({
   seasonTeamTableBodyCell: {
     flex: 1,
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
     paddingHorizontal: 8,
     paddingVertical: 10,
@@ -8539,6 +9838,56 @@ const styles = StyleSheet.create({
     minWidth: 74,
     alignItems: 'stretch',
     justifyContent: 'center',
+  },
+  seasonTeamLogoHeaderCell: {
+    maxWidth: 180,
+    minWidth: 180,
+  },
+  seasonTeamLogoCell: {
+    maxWidth: 180,
+    minWidth: 180,
+    margin: 6,
+    gap: 8,
+  },
+  seasonTeamLogoPreviewWrap: {
+    width: '100%',
+    height: 68,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#24441f',
+    backgroundColor: '#0d131d',
+  },
+  seasonTeamLogoImage: {
+    width: '100%',
+    height: '100%',
+  },
+  seasonTeamLogoPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0f172a',
+  },
+  seasonTeamLogoPlaceholderText: {
+    color: colors.sub,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  seasonTeamLogoMeta: {
+    color: colors.sub,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  seasonTeamLogoActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  seasonTeamLogoActionButton: {
+    flex: 1,
+    minHeight: 36,
+    paddingVertical: 8,
+    marginBottom: 0,
   },
   seasonTeamDeleteButton: {
     minHeight: 36,
@@ -8569,7 +9918,7 @@ const styles = StyleSheet.create({
   },
   selectBoxTriggerText: {
     color: colors.text,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
     flex: 1,
   },
@@ -8591,7 +9940,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
     backgroundColor: colors.input,
   },
@@ -8603,12 +9952,12 @@ const styles = StyleSheet.create({
   },
   selectBoxOptionText: {
     color: colors.text,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   selectBoxEmptyText: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     paddingHorizontal: 10,
     paddingVertical: 10,
   },
@@ -8681,13 +10030,13 @@ const styles = StyleSheet.create({
   },
   matchEntrySideMeta: {
     color: colors.sub,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 1.1,
   },
   matchEntryBlockTitle: {
     color: colors.accent,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   matchSelectorList: {
@@ -8714,7 +10063,7 @@ const styles = StyleSheet.create({
   },
   matchSelectorText: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
   },
   matchSelectorTextSelected: {
@@ -8723,16 +10072,52 @@ const styles = StyleSheet.create({
   },
   matchSelectionHint: {
     color: colors.sub,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   body: {
     color: colors.text,
     fontWeight: '600',
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  teamListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  teamListLogoWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#24441f',
+    backgroundColor: '#0f172a',
+  },
+  teamListLogo: {
+    width: '100%',
+    height: '100%',
+  },
+  teamListLogoFallback: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#17351b',
+  },
+  teamListLogoFallbackText: {
+    color: colors.neon,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  teamListTextWrap: {
+    flex: 1,
+    gap: 4,
   },
   result: {
     color: colors.neon,
     fontWeight: '800',
+    fontSize: 15,
     marginTop: 4,
   },
   tableHeader: {
@@ -8747,7 +10132,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.text,
     fontWeight: '800',
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
   },
   tableRow: {
@@ -8764,7 +10149,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.text,
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
   },
   leaguePage: {
@@ -8778,7 +10163,7 @@ const styles = StyleSheet.create({
   leagueBackLink: {
     color: colors.accent,
     fontWeight: '700',
-    fontSize: 13,
+    fontSize: 14,
   },
   leagueTopTabBar: {
     borderRadius: 12,
@@ -8791,7 +10176,7 @@ const styles = StyleSheet.create({
   },
   leagueTopTabText: {
     color: '#8fc6ff',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
   },
   leagueSeasonNavRow: {
@@ -8866,11 +10251,11 @@ const styles = StyleSheet.create({
   },
   leaguePanelHint: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
   },
   leagueLoadingText: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 6,
   },
   leagueMobileList: {
@@ -8917,7 +10302,7 @@ const styles = StyleSheet.create({
   },
   leagueMobilePointLabel: {
     color: colors.sub,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   leagueMobilePointValue: {
@@ -8945,12 +10330,12 @@ const styles = StyleSheet.create({
   },
   leagueMobileStatLabel: {
     color: colors.sub,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
   },
   leagueMobileStatValue: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
   },
   leagueMobileRecentRow: {
@@ -8963,7 +10348,7 @@ const styles = StyleSheet.create({
   },
   leagueMobileRecentLabel: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   leagueTableWrap: {
@@ -8982,7 +10367,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: '#cce7ff',
     fontWeight: '800',
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
   },
   leagueTableRow: {
@@ -9000,7 +10385,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.text,
     fontWeight: '700',
-    fontSize: 13,
+    fontSize: 14,
     textAlign: 'center',
   },
   leagueTableTeamCell: {
@@ -9011,6 +10396,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     paddingHorizontal: 4,
+  },
+  leagueTeamBadgeImageWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#436c9a',
+    backgroundColor: '#102332',
+  },
+  leagueTeamBadgeImage: {
+    width: '100%',
+    height: '100%',
   },
   leagueTeamBadge: {
     width: 22,
@@ -9024,14 +10422,18 @@ const styles = StyleSheet.create({
   },
   leagueTeamBadgeText: {
     color: '#a8d2ff',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
   },
   leagueTeamNameText: {
     flex: 1,
     color: colors.text,
     fontWeight: '700',
-    fontSize: 13,
+    fontSize: 14,
+  },
+  leagueTeamPlayersText: {
+    color: colors.sub,
+    fontWeight: '600',
   },
   leagueTeamProfileAvatarWrap: {
     width: 24,
@@ -9095,7 +10497,7 @@ const styles = StyleSheet.create({
   },
   leagueRecentBadgeText: {
     color: colors.text,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   matchTableHeader: {
@@ -9121,7 +10523,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.text,
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
   },
   matchCellBox: {
@@ -9156,7 +10558,7 @@ const styles = StyleSheet.create({
   },
   resultManageStatus: {
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   resultManageScoreCol: {
@@ -9230,7 +10632,7 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
     color: colors.sub,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   calendarGrid: {
@@ -9280,7 +10682,7 @@ const styles = StyleSheet.create({
   },
   calendarDayText: {
     color: colors.text,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   calendarDayTextSelected: {
@@ -9300,7 +10702,7 @@ const styles = StyleSheet.create({
   calendarEventCount: {
     marginTop: 4,
     color: colors.sub,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
   },
   calendarEventItem: {
@@ -9326,7 +10728,7 @@ const styles = StyleSheet.create({
   },
   seasonEventDeleteButtonText: {
     color: '#fda4af',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '800',
   },
   modalBackdrop: {
